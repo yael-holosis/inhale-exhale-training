@@ -1,14 +1,20 @@
-# The dataset built by `build_dataset.py`: production's own windows, labelled by production's
-# own inhale/exhale calculation. See utils/building.py for what that means and does not mean.
+# The dataset built by `build_dataset.py`: the windows already in `RespirationWindow`, labelled
+# by production's own inhale/exhale calculation. See phase/building.py for what that means and
+# does not mean. **No raw scan is read** - the app repo already ran the pipeline to build these
+# windows, so a build here is two reads and a function call.
 name: algo_labels
 dir: data_sets/algo_labels
 
-# Which instance to build from. `ds_prod` reads production's patients and raw scans and writes
-# nothing to production; `ds_algo` is the data-science cohort, which has the sleep-lab nights.
-env: ds_prod
-# Patient prefixes, matching the study name or the patient key. Null is every patient.
-patients: [bs-, RM-]
-signals_per_patient: 100
+# Which instance. `ds_algo` is the data-science cohort - the SL sleep-lab nights, and where
+# nearly every uploaded window is; `ds_prod` is the pilots. Run each separately into the same
+# directory; nothing is ever written to production.
+env: ds_algo
+# Patient prefixes, matching the display name (SL0066) or the patient key (algo-p089, bs-).
+# Null is every patient with uploaded windows.
+patients: null
+# Cap on signals per patient, sampled seeded and spread across sessions. Null takes everything
+# uploaded - the right setting while the uploaded pool is this small.
+signals_per_patient: null
 # Sampling seed. The same seed gives the same signals across processes and across machines.
 sample_seed: 20260819
 # A window with no stored rate has nothing for the detector to run at, so it carries no phases.

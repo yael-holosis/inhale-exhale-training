@@ -12,16 +12,15 @@ The first dataset is the **production algorithm's own output**, so every metric 
 it is imitation rather than correctness. `README.md` states the caveats; do not write a summary
 that drops them.
 
-## Three repos, one pipeline
+## One dependency: the labelling app repo
 
-Nothing about the signal is decided here. This repo imports:
+Nothing about the signal is decided here. `respiration-phase-labeling` owns the connections to
+both instances, the `RespirationWindow` table, the window blobs in S3 and the call into
+production's phase calculation; it reaches `inhale-exhale-detection`, which wraps `holosissystem`
+**0.6.6** unmodified. Reached through `phase/bridge.py`.
 
-- `respiration-phase-labeling` - signal selection, sampling, the raw-scan run, orientation, and
-  production's phases per window. Reached through `phase/bridge.py`.
-- `inhale-exhale-detection` - the wrapper that runs `holosissystem` unmodified.
-- `holosissystem` **0.6.6**, from the release index - it decides the numerics of every window.
-
-Do not reimplement any of that here. If something is missing, add it there.
+This repo **reads what that one built**. It does not run the pipeline, does not download a raw
+scan, and does not write to any database. To get more windows, run `upload_windows.py` there.
 
 ## Conventions
 
@@ -37,8 +36,14 @@ Do not reimplement any of that here. If something is missing, add it there.
 
 ## Traps
 
-- **A built shard is never rebuilt.** `fast_small_kmeans` is unseeded, so a rebuild is a
-  different trace. Resumption exists for correctness, not economy.
+- **A window blob is immutable.** The app repo refuses to overwrite one, because
+  `fast_small_kmeans` is unseeded and a rebuild is a different trace that stored labels would no
+  longer describe. Shards inherit that: a shard on disk is never rebuilt.
+- **`browse()` has no "labelled" column.** It has `Spans` (phase records on the window),
+  `Labelers` and `LastLabelled`. Filtering on a column that is not there silently keeps every
+  row - that mistake reported 1,933 labelled windows where there were 21.
+- **A span's `EndIndex` is inclusive; a window's is exclusive.** Adjacent spans share a boundary
+  sample. Off by one turns every human boundary into a systematic bias.
 - **`unknown` is structural, not only "uncallable".** Production emits no phase for the turn from
   inhale to exhale, so the class sits at the crest of most breaths in this dataset.
 - **The decoder's allowed transitions describe the label set**, not physiology. They change if

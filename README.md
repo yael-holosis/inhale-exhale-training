@@ -4,10 +4,11 @@ Train a per-sample **inhale / exhale / stop / unknown** segmenter on radar respi
 waveforms, at 10 fps, any length in and one class per sample out. Small enough for the edge
 device: 18,188 parameters at the default shape.
 
-The first training set is **the production algorithm's own output**. Human labelling in
-[`respiration-phase-labeling`](https://github.com/Holosis-Health/respiration-phase-labeling) is
-under way but still small - 15 approved windows, 6.7 minutes, as of 2026-08-18 - so the network
-starts by learning what the device already does and moves onto human labels as they arrive.
+The first training set is **the production algorithm's own output**, over the windows that
+[`respiration-phase-labeling`](https://github.com/Holosis-Health/respiration-phase-labeling) -
+the labelling app - has already uploaded. Human labelling there is under way but still small: of
+1,933 uploaded windows on `ds_algo`, **21 carry a human span**. So the network starts by learning
+what the device already does, and moves onto human labels as they arrive.
 
 ## Read this before quoting a number
 
@@ -45,9 +46,12 @@ Three things have to be reachable, and each is reported by name if it is not:
 
 | What | Where | Override |
 | --- | --- | --- |
-| `respiration-phase-labeling` checkout | `repos.labeling` | `RESPIRATION_PHASE_LABELING_REPO` |
-| `inhale-exhale-detection` checkout | `repos.detection` | `INHALE_EXHALE_DETECTION_REPO` |
+| `respiration-phase-labeling` checkout | `repos.labeling_app` | `RESPIRATION_PHASE_LABELING_REPO` |
 | ClearML credentials | `~/clearml.conf` | `DISABLE_CLEARML=true` to run without |
+
+The app repo is the only dependency: it owns both connections, the `RespirationWindow` table,
+the window blobs in S3 and the call into production's phase calculation, and it reaches
+`inhale-exhale-detection` itself.
 
 ### Credentials and profiles
 
@@ -85,32 +89,34 @@ aws sso login --profile holosis-prod-admin        # ds_prod only
 ## Building the dataset
 
 ```bash
-poetry run python build_dataset.py --env ds_prod --patients bs- RM- --per-patient 100
-poetry run python build_dataset.py --env ds_algo --patients SL   --per-patient 100
+poetry run python build_dataset.py --catalogue --env ds_algo   # what is uploaded, no writes
+poetry run python build_dataset.py --env ds_algo               # the SL sleep-lab nights
+poetry run python build_dataset.py --env ds_prod               # the pilots
 ```
 
-**Two cohorts, two runs, one directory.** `ds_prod` is the pilots (`bs-`, `RM-`); `ds_algo` is
-the data-science instance, where the `SL` sleep-lab nights are. They cannot be one run - the raw
-scans live in different accounts and `scan_reader` switches the process's profile to reach them
-- so a shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from every shard
-present. Their `RadarSignal` ID spaces are unrelated (signal 2120091 is a different recording on
-each), which is what the prefix is for.
+**No raw scan is read.** The app repo already ran the production pipeline when it uploaded these
+windows; this reads each window's samples from S3 and asks production's own
+`calculate_inhale_exhale_time` what it calls on them. Two reads and a function call - about 4.5 s
+per signal, and no disk pressure at all.
 
-Samples signals per patient - seeded, and spread across sessions so a patient with a thousand
-sessions does not contribute a thousand near-identical minutes of one night - runs the
-production pipeline on each raw scan, and keeps every window the inhale/exhale calculation was
-given together with the phases it called on that window. One `.npz` per signal plus a manifest
-row per window; roughly 3-4 s per signal, most of it the scan download.
+That also means the training windows are **the same objects a labeller sees**, byte for byte.
+`RespirationWindowID` goes into the manifest, so a human label written later joins straight onto
+the row the network trained on, with no re-derivation and no risk of the two describing different
+samples.
 
-Start with `--limit 20` to see the shape of a run before committing hours to one.
+**To grow the pool, upload more windows from the app repo.** Building a window is its job:
 
-**Nothing is written to `RespirationWindow`.** That table is the labelling app's browse list and
-a run this size would bury it. Every manifest row carries `RadarSignalID` and `WindowIndex`, so a
-human-labelled window can be joined in later and held out.
+```bash
+poetry run python upload_windows.py --env ds_algo --patients SL --per-patient 20 --commit
+```
 
-**Resumable, and it has to be**: a signal whose shard exists is not rebuilt, because
-`fast_small_kmeans` draws from the unseeded global RNG and a rebuild produces a *different*
-trace. Half a set built from each would be two datasets in one directory.
+**Two cohorts, two runs, one directory.** `ds_algo` is the data-science instance, where the `SL`
+sleep-lab nights are and where nearly every uploaded window lives; `ds_prod` is the pilots. Their
+`RadarSignal` ID spaces are unrelated - signal 2120091 is a different recording on each - so a
+shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from every shard present.
+
+**Resumable**, and it costs nothing to be: a window blob is immutable once uploaded, because the
+app repo refuses to overwrite one that labels already point at.
 
 ## Training
 
@@ -236,13 +242,16 @@ DISABLE_CLEARML=true poetry run python train.py \
 
 ## Open
 
-- **The dataset has not been built at scale yet.** Verification runs of 2-3 signals per cohort
-  work end to end against both `ds_prod` and `ds_algo`; the first full build is the next step.
-  Early class balance on 22 windows: unknown 33%, exhale 26%, inhale 25%, stop 16% - far more
-  even than the human set's 64% unknown, because production labels every breath it detects.
-- **The build needs disk.** Each signal downloads a 7-28 MB raw scan, discarded after its windows
-  are extracted. A machine with no headroom fails per signal with `[Errno 28] No space left on
-  device`, reports it, and carries on - so a starved run finishes looking successful and short.
+- **The pool is the uploaded windows, and it is small**: 1,933 on `ds_algo` over 293 signals and
+  19 `SL` patients, 45 on `ds_prod` over 5 signals of one patient. Roughly 11 hours of trace in
+  total. Growing it is an `upload_windows.py` run in the app repo, not a change here.
+- **`ds_prod` is one patient.** Every pilot cohort - 44 patients, 65,671 eligible signals - is
+  reachable, but only `bs-008` has had windows built. Until more are uploaded, the pilots are not
+  represented in training at all.
+- **The two instances differ in acquisition.** `ds_algo`'s eligible signals are ~51% 300 fps
+  two-antenna and 49% 200 fps; `ds_prod` is 100% 200 fps. The preprocessing differs between them,
+  so a model trained on one cohort is not obviously transferable to the other - worth measuring
+  before assuming.
 - Whether breath shape alone settles direction under the polarity flip. If it does not, the
   phase anchor becomes a second input channel.
 - Whether the human set is large enough for a fine-tune rather than only an evaluation.

@@ -12,12 +12,12 @@ clearml:
   enabled: true
   timeout_s: 10
 
-# Where the two repos that own the pipeline are. Environment variables override, so a second
-# machine does not need this file edited:
-#   RESPIRATION_PHASE_LABELING_REPO, INHALE_EXHALE_DETECTION_REPO
+# The labelling **app** repo - respiration-phase-labeling. It owns the connections to both
+# instances, the RespirationWindow table, the window blobs in S3 and the call into production's
+# phase calculation; it in turn reaches inhale-exhale-detection. This repo reads what it built.
+# RESPIRATION_PHASE_LABELING_REPO overrides, so a second machine needs no file edited.
 repos:
-  labeling: ~/respiration-phase-labeling
-  detection: ~/inhale-exhale-detection
+  labeling_app: ~/respiration-phase-labeling
 
 seed: 20260820
 out_dir: out

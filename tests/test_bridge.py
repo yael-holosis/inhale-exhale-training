@@ -30,7 +30,7 @@ def test_our_package_is_importable_under_its_own_name():
 
 
 def test_a_missing_checkout_is_reported_rather_than_raised():
-    bundle, reason = bridge.labeling("/nowhere/at/all")
+    bundle, reason = bridge.labeling_app("/nowhere/at/all")
     assert bundle is None
     assert "no respiration-phase-labeling checkout" in reason
 
@@ -38,11 +38,13 @@ def test_a_missing_checkout_is_reported_rather_than_raised():
 @pytest.mark.skipif(not Path("~/respiration-phase-labeling").expanduser().exists(),
                     reason="the labelling checkout is not on this machine")
 def test_the_bridge_reaches_their_modules_not_ours():
-    bundle = bridge.require_labeling("~/respiration-phase-labeling")
-    assert "respiration-phase-labeling" in bundle["building"].__file__
-    assert "respiration-phase-labeling" in bundle["suggestion"].__file__
-    for name in ("eligible_signals", "sample_signals", "windows_of"):
-        assert hasattr(bundle["building"], name)
+    bundle = bridge.require_app("~/respiration-phase-labeling")
+    for key in ("db", "suggestion", "waveforms"):
+        assert "respiration-phase-labeling" in bundle[key].__file__
+    # The three calls the build is made of: the catalogue, the samples, the algorithm's answer.
+    assert hasattr(bundle["db"], "browse")
+    assert hasattr(bundle["db"], "windows_for_signal")
+    assert hasattr(bundle["waveforms"], "window_samples")
     assert hasattr(bundle["suggestion"], "suggest")
 
 

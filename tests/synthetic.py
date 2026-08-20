@@ -82,23 +82,27 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
                 values=np.concatenate(values).astype(np.float32),
                 targets=np.concatenate(targets).astype(np.int8),
                 offsets=offsets,
+                window_id=signal_id * 100 + np.arange(windows_per_signal, dtype=np.int64),
                 window_index=np.arange(windows_per_signal, dtype=np.int64),
                 start_index=np.arange(windows_per_signal, dtype=np.int64) * 50,
                 analysis_fps=np.full(windows_per_signal, fps, dtype=np.float32),
                 respiration_rate=np.full(windows_per_signal, rate, dtype=np.float32),
                 range_bin=np.zeros(windows_per_signal, dtype=np.int64),
-                rejected=np.zeros(windows_per_signal, dtype=bool),
-                orientation=np.array(["kept"] * windows_per_signal),
+                reviewer_flipped=np.zeros(windows_per_signal, dtype=bool),
+                n_spans=np.full(windows_per_signal, 3, dtype=np.int64),
+                system_version=np.array(["0.6.6"] * windows_per_signal),
                 signal_id=np.int64(signal_id), patient=np.str_(name),
-                session_id=np.int64(patient), env=np.str_(ENV))
+                patient_key=np.str_(name), session_id=np.int64(patient), env=np.str_(ENV))
             for position in range(windows_per_signal):
                 counts = class_counts(targets[position])
                 rows.append({"env": ENV, "shard": shard, "position": position,
+                             "RespirationWindowID": signal_id * 100 + position,
                              "RadarSignalID": signal_id, "SessionID": patient,
-                             "PatientID": name, "WindowIndex": position,
+                             "PatientID": name, "PatientKey": name, "WindowIndex": position,
                              "start_index": position * 50, "samples": samples,
                              "analysis_fps": fps, "respiration_rate": rate, "range_bin": 0,
-                             "rejected": False, "orientation": "kept", "n_spans": 0,
+                             "reviewer_flipped": False, "system_version": "0.6.6",
+                             "n_spans": 3,
                              **{f"n_{phase}": counts[phase] for phase in PHASES}})
 
     manifest = pd.DataFrame(rows)
