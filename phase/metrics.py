@@ -1,0 +1,121 @@
+"""What a run is judged on. Per-sample agreement is the loss's own view - not the answer.
+
+Three levels, because they fail differently:
+
+- **Per-sample** F1 per class. Catches nothing about segment structure: a model that emits the
+  right classes in shredded pieces scores well here.
+- **Event level**, IoU-matched. One predicted segment matches one reference segment of the same
+  class when their overlap over union clears a threshold; unmatched reference segments are
+  misses and unmatched predictions are false alarms. This is what says whether breaths came out
+  as breaths.
+- **Boundary error**, in samples, over the matched pairs. What a phase *duration* inherits.
+
+Every number here is against the labels in the dataset, which are production's own answer. On
+the algorithm-labelled set they measure imitation, not correctness - only the human-labelled
+windows measure correctness.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+
+from phase.labels import PHASES, UNKNOWN, targets_to_spans
+
+
+def per_sample(pred: np.ndarray, truth: np.ndarray,
+               mask: np.ndarray | None = None) -> dict[str, float]:
+    """Precision / recall / F1 per class plus macro F1 over the called classes.
+
+    Macro excludes `unknown`: it is 60-70% of the samples and a model that says nothing else
+    would otherwise post a respectable macro score.
+    """
+    pred, truth = np.asarray(pred).ravel(), np.asarray(truth).ravel()
+    if mask is not None:
+        keep = np.asarray(mask).ravel().astype(bool)
+        pred, truth = pred[keep], truth[keep]
+
+    out: dict[str, float] = {}
+    called = []
+    for index, name in enumerate(PHASES):
+        tp = float(np.sum((pred == index) & (truth == index)))
+        fp = float(np.sum((pred == index) & (truth != index)))
+        fn = float(np.sum((pred != index) & (truth == index)))
+        precision = tp / (tp + fp) if tp + fp else 0.0
+        recall = tp / (tp + fn) if tp + fn else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+        out[f"precision_{name}"] = precision
+        out[f"recall_{name}"] = recall
+        out[f"f1_{name}"] = f1
+        if index != UNKNOWN:
+            called.append(f1)
+    out["macro_f1"] = float(np.mean(called)) if called else 0.0
+    out["accuracy"] = float(np.mean(pred == truth)) if pred.size else 0.0
+    return out
+
+
+def _segments(labels: np.ndarray, drop_unknown: bool = True) -> list[dict]:
+    spans = targets_to_spans(np.asarray(labels))
+    return [span for span in spans if not (drop_unknown and span["phase"] == PHASES[UNKNOWN])]
+
+
+def event_level(pred: np.ndarray, truth: np.ndarray,
+                iou_threshold: float = 0.5) -> dict[str, float]:
+    """Greedy best-IoU matching within each class. Reports F1 and boundary error per class."""
+    out: dict[str, float] = {}
+    starts, ends = [], []
+    for name in PHASES:
+        if name == PHASES[UNKNOWN]:
+            continue
+        reference = [s for s in _segments(truth) if s["phase"] == name]
+        proposed = [s for s in _segments(pred) if s["phase"] == name]
+        matched, start_errors, end_errors = _match(reference, proposed, iou_threshold)
+        precision = matched / len(proposed) if proposed else 0.0
+        recall = matched / len(reference) if reference else 0.0
+        out[f"event_f1_{name}"] = (2 * precision * recall / (precision + recall)
+                                   if precision + recall else 0.0)
+        out[f"event_recall_{name}"] = recall
+        out[f"event_precision_{name}"] = precision
+        out[f"n_true_{name}"] = float(len(reference))
+        starts.extend(start_errors)
+        ends.extend(end_errors)
+    out["boundary_mae_samples"] = float(np.mean(np.abs(starts + ends))) if starts else float("nan")
+    out["start_mae_samples"] = float(np.mean(np.abs(starts))) if starts else float("nan")
+    out["end_mae_samples"] = float(np.mean(np.abs(ends))) if ends else float("nan")
+    return out
+
+
+def _match(reference: list[dict], proposed: list[dict], threshold: float):
+    taken, matched, start_errors, end_errors = set(), 0, [], []
+    for target in reference:
+        best, best_iou = None, 0.0
+        for position, candidate in enumerate(proposed):
+            if position in taken:
+                continue
+            overlap = min(target["end"], candidate["end"]) - max(target["start"],
+                                                                 candidate["start"])
+            if overlap <= 0:
+                continue
+            union = (max(target["end"], candidate["end"])
+                     - min(target["start"], candidate["start"]))
+            iou = overlap / union
+            if iou > best_iou:
+                best, best_iou = position, iou
+        if best is not None and best_iou >= threshold:
+            taken.add(best)
+            matched += 1
+            start_errors.append(proposed[best]["start"] - target["start"])
+            end_errors.append(proposed[best]["end"] - target["end"])
+    return matched, start_errors, end_errors
+
+
+def phase_durations(labels: np.ndarray, fps: float) -> dict[str, float]:
+    """Mean seconds per phase and the I:E ratio, for comparing against the device's own numbers."""
+    out = {}
+    for name in PHASES:
+        if name == PHASES[UNKNOWN]:
+            continue
+        lengths = [s["end"] - s["start"] for s in _segments(labels) if s["phase"] == name]
+        out[f"mean_{name}_sec"] = float(np.mean(lengths) / fps) if lengths else float("nan")
+    inhale, exhale = out.get("mean_inhale_sec"), out.get("mean_exhale_sec")
+    out["ie_ratio"] = float(exhale / inhale) if inhale and inhale > 0 else float("nan")
+    return out

@@ -1,0 +1,32 @@
+# The dataset built by `build_dataset.py`: production's own windows, labelled by production's
+# own inhale/exhale calculation. See utils/building.py for what that means and does not mean.
+name: algo_labels
+dir: data_sets/algo_labels
+
+# Which instance to build from. `ds_prod` reads production's patients and raw scans and writes
+# nothing to production; `ds_algo` is the data-science cohort, which has the sleep-lab nights.
+env: ds_prod
+# Patient prefixes, matching the study name or the patient key. Null is every patient.
+patients: [bs-, RM-]
+signals_per_patient: 100
+# Sampling seed. The same seed gives the same signals across processes and across machines.
+sample_seed: 20260819
+# A window with no stored rate has nothing for the detector to run at, so it carries no phases.
+# Kept and labelled entirely unknown - "the algorithm found nothing here" is a training signal,
+# and dropping those windows would bias the set towards easy breathing.
+requires_rate: true
+
+# 200 samples = the pipeline's own 20 s window at 10 fps. Longer windows (it grows one by 5 s
+# and retries when it cannot find three breaths) are cropped; shorter ones are padded and masked.
+crop_samples: 200
+# 'window' z-scores each item on its own statistics - what the device can do at inference, since
+# it has no corpus statistics to hand.
+normalise: window
+
+folds: 5
+fold: 0
+# Carved out of train by patient, never out of test. Anything that picks a checkpoint needs it.
+val_fraction: 0.2
+
+batch_size: 64
+num_workers: 4

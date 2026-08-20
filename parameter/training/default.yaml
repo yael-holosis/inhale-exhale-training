@@ -1,0 +1,46 @@
+max_epochs: 60
+lr: 0.003
+weight_decay: 0.0001
+scheduler: cosine
+precision: 32
+accelerator: auto
+early_stopping_patience: 12
+monitor: val/macro_f1
+monitor_mode: max
+
+ce_weight: 1.0
+dice_weight: 1.0
+# Inverse frequency from the training split's own counts, softened and capped. Raw inverse on a
+# set that is 60-70% unknown hands the whole loss to whichever class is rarest.
+class_weight_power: 0.5
+class_weight_cap: 10.0
+
+event_iou: 0.5
+
+augmentation:
+  # The one that matters: the stored sign is arbitrary, so negating the trace and exchanging
+  # inhale with exhale is the same measurement written the other way up, not a distortion.
+  flip_prob: 0.5
+  time_warp_prob: 0.5
+  time_warp_range: [0.8, 1.25]
+  amplitude_prob: 0.5
+  amplitude_range: [0.5, 2.0]
+  drift_prob: 0.3
+  drift_scale: 0.3
+  noise_prob: 0.3
+  noise_scale: 0.05
+
+decoding:
+  viterbi: true
+  enforce_min: true
+  switch_penalty: 2.0
+  # Sample floors at 10 fps. A phase shorter than 0.3 s is a decoder artefact, not a breath.
+  min_duration: {unknown: 1, inhale: 3, exhale: 3, stop: 2}
+  # A claim about THIS label set, not about physiology. Production emits no phase for the turn
+  # from inhale to exhale, so `inhale -> unknown -> exhale` is the normal path here and
+  # `inhale -> exhale` is not. Re-derive this if the labels ever come from people instead.
+  allowed:
+    unknown: [inhale, exhale, stop]
+    inhale:  [unknown]
+    exhale:  [unknown, stop]
+    stop:    [unknown, inhale]

@@ -1,0 +1,11 @@
+# 1D U-Net, U-Time shaped (Perslev et al., NeurIPS 2019) with depthwise-separable convolutions.
+name: unet1d
+in_channels: 1          # the waveform alone
+channels: [16, 24, 32]  # one per encoder level; its length is the depth
+bottleneck: 48
+kernel_size: 9
+dropout: 0.0
+# Depth 3 at kernel 9 gives 18,188 parameters and a 353-sample receptive field - 35 s, so an
+# output sample sees the whole 20 s window plus margin. Depth 4 ([16,24,32,48] / 64) is 35,932
+# parameters and 737 samples (74 s), which is more context than a window contains; it is the
+# setting for running on a whole signal rather than on the pipeline's windows.

@@ -1,0 +1,57 @@
+[tool.poetry]
+name = "inhale-exhale-training"
+version = "0.1.0"
+description = "Train a per-sample inhale/exhale/stop segmenter on the production algorithm's own output"
+authors = ["Yael Alon <yalon@holosishealth.com>"]
+readme = "README.md"
+package-mode = false
+
+# Release index, matching respiration-phase-labeling. `holosissystem` decides the numerics of
+# every window this repo builds its dataset from, so it must not float onto a dev build.
+[[tool.poetry.source]]
+name = "deploymentserver"
+url = "http://63.176.1.98/pulp/content/pypi/simple/"
+priority = "supplemental"
+
+[[tool.poetry.source]]
+name = "pytorch-cuda-121"
+url = "https://download.pytorch.org/whl/cu121"
+priority = "explicit"
+
+[tool.poetry.dependencies]
+# Pinned, not "^3.12": holosissystem requires <3.13 and a caret range builds on whichever
+# newer interpreter is on the machine.
+python = ">=3.12,<3.13"
+
+torch = "2.9.1"
+pytorch-lightning = "^2.4.0"
+tensorboard = "^2.18.0"
+clearml = "^1.16.5"
+hydra-core = "^1.3.2"
+
+numpy = "^2.1"
+pandas = "^2.2"
+scipy = "^1.14"
+scikit-learn = "^1.5"
+pyyaml = "^6.0"
+matplotlib = "^3.9"
+
+# Dataset build only. Same pins as respiration-phase-labeling: the labels in this dataset are
+# that repo's window build plus production's own phase calculation, so the versions that decide
+# them have to be the versions it validated against.
+holosissystem = "0.6.6"
+holosis-aws-manager = "*"
+sqlalchemy = "^2.0"
+pymysql = "^1.1"
+boto3 = "^1.35"
+
+[tool.poetry.group.dev.dependencies]
+ipykernel = "^6.29"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

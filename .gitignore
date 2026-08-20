@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+data_sets/
+out/
+outputs/
+logs/
+lightning_logs/
+checkpoints/
+clearml.conf

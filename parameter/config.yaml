@@ -1,0 +1,29 @@
+# Hydra root. Everything a run depends on is here or in the groups below - no literals in code.
+defaults:
+  - data: algo_labels
+  - model: unet1d
+  - training: default
+  - _self_
+
+clearml:
+  # The designated project. Credentials come from ~/clearml.conf, exactly as in `cough` -
+  # nothing is written down in this repo, and DISABLE_CLEARML=true turns logging off entirely.
+  project_name: inhale-exhale-phase
+  enabled: true
+  timeout_s: 10
+
+# Where the two repos that own the pipeline are. Environment variables override, so a second
+# machine does not need this file edited:
+#   RESPIRATION_PHASE_LABELING_REPO, INHALE_EXHALE_DETECTION_REPO
+repos:
+  labeling: ~/respiration-phase-labeling
+  detection: ~/inhale-exhale-detection
+
+seed: 20260820
+out_dir: out
+
+hydra:
+  run:
+    dir: outputs/${now:%Y-%m-%d}/${now:%H-%M-%S}
+  sweep:
+    dir: outputs/multirun/${now:%Y-%m-%d}/${now:%H-%M-%S}

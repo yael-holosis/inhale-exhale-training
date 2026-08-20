@@ -1,0 +1,178 @@
+"""The torch dataset over the built shards, and the augmentations that are safe on it.
+
+One item is one window: a 1-channel trace and its per-sample target, cropped or padded to a
+fixed length for batching. Inference does not use this - the network is fully convolutional and
+takes a whole signal.
+
+**The polarity flip is the augmentation that matters.** The sign of a stored window is arbitrary
+- `select_waveform` returns whichever of a bin's real / imaginary parts has the larger std - so
+negating the trace and exchanging inhale with exhale produces a sample that is just as real as
+the one it came from. It is not a distortion of the data; it is the same measurement written the
+other way up. `phase.labels.SWAP_ON_FLIP` is the label half of it.
+
+Note what that costs: a model trained under it cannot use absolute polarity to decide direction,
+because the training set contains both. That is the correct constraint - the device has no way to
+know a window's polarity either - but it means direction has to come from breath shape.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import torch
+from torch.utils.data import Dataset
+
+from phase.labels import SWAP_ON_FLIP, UNKNOWN
+
+
+class WindowDataset(Dataset):
+    """Windows named by a manifest slice, read from the shards beside it.
+
+    Args:
+        manifest: rows of `manifest.csv` - already filtered to this split.
+        root: directory holding the shards.
+        crop: samples per item. Longer windows are randomly cropped when training and
+            centre-cropped otherwise; shorter ones are padded and masked out.
+        train: whether to augment.
+        augment: the `training.augmentation` config block.
+        normalise: 'window' z-scores each item on its own statistics. That is what the device
+            can do at inference - it has no corpus statistics - so it is the default.
+    """
+
+    PAD_LABEL = UNKNOWN
+
+    def __init__(self, manifest: pd.DataFrame, root: str | Path, crop: int = 200,
+                 train: bool = False, augment: dict[str, Any] | None = None,
+                 normalise: str = "window", seed: int = 0):
+        self.rows = manifest.reset_index(drop=True)
+        self.root = Path(root)
+        self.crop = int(crop)
+        self.train = bool(train)
+        self.augment = dict(augment or {})
+        self.normalise = normalise
+        self.seed = int(seed)
+        self._cache: dict[str, dict[str, np.ndarray]] = {}
+
+    def __len__(self) -> int:
+        return len(self.rows)
+
+    def _shard(self, name: str) -> dict[str, np.ndarray]:
+        if name not in self._cache:
+            with np.load(self.root / name, allow_pickle=False) as stored:
+                self._cache[name] = {"values": stored["values"], "targets": stored["targets"],
+                                     "offsets": stored["offsets"]}
+        return self._cache[name]
+
+    def _window(self, index: int) -> tuple[np.ndarray, np.ndarray]:
+        row = self.rows.iloc[index]
+        shard = self._shard(str(row["shard"]))
+        position = int(row["position"])
+        start, end = shard["offsets"][position], shard["offsets"][position + 1]
+        return (shard["values"][start:end].astype(np.float32),
+                shard["targets"][start:end].astype(np.int64))
+
+    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+        values, target = self._window(index)
+        rng = np.random.default_rng(None if self.train else self.seed + index)
+
+        if self.train:
+            values, target = self._augment(values, target, rng)
+        values, target, mask = self._fit(values, target, rng)
+        values = self._normalise(values)
+
+        return {"x": torch.from_numpy(values[None, :]),
+                "y": torch.from_numpy(target),
+                "mask": torch.from_numpy(mask),
+                "row": index}
+
+    # ------------------------------------------------------------------ shaping
+
+    def _fit(self, values: np.ndarray, target: np.ndarray,
+             rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Crop or pad to `self.crop`. Padding is masked, never learned from."""
+        length = values.size
+        if length >= self.crop:
+            spare = length - self.crop
+            start = int(rng.integers(spare + 1)) if self.train else spare // 2
+            stop = start + self.crop
+            return values[start:stop], target[start:stop], np.ones(self.crop, dtype=bool)
+        mask = np.zeros(self.crop, dtype=bool)
+        mask[:length] = True
+        padded_values = np.zeros(self.crop, dtype=np.float32)
+        padded_target = np.full(self.crop, self.PAD_LABEL, dtype=np.int64)
+        padded_values[:length] = values
+        padded_target[:length] = target
+        return padded_values, padded_target, mask
+
+    def _normalise(self, values: np.ndarray) -> np.ndarray:
+        if self.normalise != "window":
+            return values
+        centred = values - values.mean()
+        scale = centred.std()
+        # A flat window is a real thing (an apnoea, a lost bin). Dividing it by its own noise
+        # would amplify that noise into something that looks like breathing.
+        return centred / scale if scale > 1e-8 else centred
+
+    # ------------------------------------------------------------------ augmentation
+
+    def _augment(self, values: np.ndarray, target: np.ndarray,
+                 rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+        cfg = self.augment
+        if rng.random() < cfg.get("flip_prob", 0.0):
+            values = -values
+            target = SWAP_ON_FLIP[target]
+        if rng.random() < cfg.get("time_warp_prob", 0.0):
+            values, target = time_warp(values, target, cfg.get("time_warp_range", (0.8, 1.25)),
+                                       rng)
+        if rng.random() < cfg.get("amplitude_prob", 0.0):
+            low, high = cfg.get("amplitude_range", (0.5, 2.0))
+            values = values * float(rng.uniform(low, high))
+        if rng.random() < cfg.get("drift_prob", 0.0):
+            values = values + baseline_drift(values.size, cfg.get("drift_scale", 0.3), rng)
+        if rng.random() < cfg.get("noise_prob", 0.0):
+            scale = cfg.get("noise_scale", 0.05) * (values.std() or 1.0)
+            values = values + rng.normal(0.0, scale, values.size).astype(np.float32)
+        return values.astype(np.float32), target
+
+
+def time_warp(values: np.ndarray, target: np.ndarray, factor_range, rng) -> tuple:
+    """Resample the window, so a breath at 12 bpm can stand in for one at 15.
+
+    The trace is interpolated linearly and the target with nearest-neighbour - a class index has
+    no midpoint, and a linear blend of INHALE and EXHALE would land on the STOP index.
+    """
+    low, high = factor_range
+    factor = float(rng.uniform(low, high))
+    length = max(8, int(round(values.size * factor)))
+    source = np.linspace(0.0, values.size - 1, values.size)
+    wanted = np.linspace(0.0, values.size - 1, length)
+    warped = np.interp(wanted, source, values).astype(np.float32)
+    indices = np.clip(np.round(wanted).astype(int), 0, values.size - 1)
+    return warped, target[indices]
+
+
+def baseline_drift(length: int, scale: float, rng) -> np.ndarray:
+    """A slow wander under the breathing: two sub-breath-rate sinusoids at random phase."""
+    t = np.arange(length, dtype=np.float32) / max(length - 1, 1)
+    drift = np.zeros(length, dtype=np.float32)
+    for _ in range(2):
+        cycles = float(rng.uniform(0.25, 1.0))
+        drift += np.sin(2 * np.pi * cycles * t + rng.uniform(0, 2 * np.pi)).astype(np.float32)
+    return (scale * drift / 2.0).astype(np.float32)
+
+
+def class_weights(manifest: pd.DataFrame, phases, power: float = 1.0,
+                  cap: float = 20.0) -> np.ndarray:
+    """Inverse-frequency weights from the manifest's own per-class counts.
+
+    Capped, because on a set where one class is nearly absent an uncapped inverse turns a handful
+    of samples into the whole loss. `power` between 0 and 1 softens it - 0.5 is the usual choice
+    when the raw inverse over-corrects.
+    """
+    counts = np.array([float(manifest[f"n_{name}"].sum()) for name in phases])
+    counts = np.maximum(counts, 1.0)
+    weights = (counts.sum() / (len(counts) * counts)) ** power
+    return np.clip(weights, 1.0 / cap, cap).astype(np.float32)
