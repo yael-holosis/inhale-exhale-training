@@ -5,19 +5,16 @@ defaults:
   - training: default
   - _self_
 
+# `parameter/sources/default.yaml` holds the databases, the bucket and the table names. It is
+# read directly by `phase.sources` rather than composed here, because the dataset build is not a
+# Hydra job and must not need the launcher to open a connection.
+
 clearml:
   # The designated project. Credentials come from ~/clearml.conf, exactly as in `cough` -
   # nothing is written down in this repo, and DISABLE_CLEARML=true turns logging off entirely.
   project_name: inhale-exhale-phase
   enabled: true
   timeout_s: 10
-
-# The labelling **app** repo - respiration-phase-labeling. It owns the connections to both
-# instances, the RespirationWindow table, the window blobs in S3 and the call into production's
-# phase calculation; it in turn reaches inhale-exhale-detection. This repo reads what it built.
-# RESPIRATION_PHASE_LABELING_REPO overrides, so a second machine needs no file edited.
-repos:
-  labeling_app: ~/respiration-phase-labeling
 
 seed: 20260820
 out_dir: out

@@ -12,15 +12,22 @@ The first dataset is the **production algorithm's own output**, so every metric 
 it is imitation rather than correctness. `README.md` states the caveats; do not write a summary
 that drops them.
 
-## One dependency: the labelling app repo
+## Standalone, and it has to stay that way
 
-Nothing about the signal is decided here. `respiration-phase-labeling` owns the connections to
-both instances, the `RespirationWindow` table, the window blobs in S3 and the call into
-production's phase calculation; it reaches `inhale-exhale-detection`, which wraps `holosissystem`
-**0.6.6** unmodified. Reached through `phase/bridge.py`.
+No sibling checkout is imported. The dependencies are `holosissystem` **0.6.6** (pip, from the
+release index - it decides the numerics of every label) and `holosis_aws_manager`. Databases and
+bucket are in `parameter/sources/default.yaml`.
 
-This repo **reads what that one built**. It does not run the pipeline, does not download a raw
-scan, and does not write to any database. To get more windows, run `upload_windows.py` there.
+`tests/test_standalone.py` enforces it: no import of a neighbouring repo, no `sys.path`
+manipulation, no `password:` in a tracked file, and reads only through `phase.sources.frame`.
+
+**This repo reads. It never writes** - not to a database, not to S3. Growing the window pool is
+somebody else's job.
+
+`phase/production.py` is a port of the phase call and span pairing that `inhale-exhale-detection`
+validated. It was checked window for window against that implementation before the dependency was
+cut - 60/60 identical labels on real windows. If the upstream phase code changes, this file has to
+follow it.
 
 ## Conventions
 
@@ -36,12 +43,17 @@ scan, and does not write to any database. To get more windows, run `upload_windo
 
 ## Traps
 
-- **A window blob is immutable.** The app repo refuses to overwrite one, because
-  `fast_small_kmeans` is unseeded and a rebuild is a different trace that stored labels would no
-  longer describe. Shards inherit that: a shard on disk is never rebuilt.
-- **`browse()` has no "labelled" column.** It has `Spans` (phase records on the window),
-  `Labelers` and `LastLabelled`. Filtering on a column that is not there silently keeps every
-  row - that mistake reported 1,933 labelled windows where there were 21.
+- **A window blob is immutable.** `fast_small_kmeans` is unseeded, so a rebuild is a different
+  trace that stored labels would no longer describe. Nothing overwrites one; shards inherit that,
+  so a shard on disk is never rebuilt.
+- **There is no "labelled" column.** `Spans` counts the phase records on a window. Filtering on a
+  column that is not there silently keeps every row - that mistake reported 1,933 labelled
+  windows where there were 21.
+- **Production's durations are means over ALL pairs**, including the ones `_valid` rejects. Filter
+  first and the pairing looks broken when it is not.
+- **`inhale_time_sec` describes the trace production RETURNED.** Where that is the negation of its
+  input, our spans - which are mapped back onto the input - have inhale and exhale exchanged
+  relative to it. `tests/test_production.py` asserts exactly that correspondence.
 - **A span's `EndIndex` is inclusive; a window's is exclusive.** Adjacent spans share a boundary
   sample. Off by one turns every human boundary into a systematic bias.
 - **`unknown` is structural, not only "uncallable".** Production emits no phase for the turn from

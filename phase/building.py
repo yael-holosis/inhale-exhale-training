@@ -1,22 +1,19 @@
 """Build the training set from the windows already in `RespirationWindow`, labelled by the algorithm.
 
-**No raw scan is read.** The app repo's `upload_windows.py` has already run the production
-pipeline on the scans and stored each window it produced - the samples in S3, the row in
-`RespirationWindow`. This repo reads those objects and asks production's own
-`calculate_inhale_exhale_time` what it calls on them. That is the whole build: two reads and a
-function call, no pipeline, no scan download, no disk pressure.
+**No raw scan is read.** The windows already exist: something has run the production pipeline on
+the scans and stored each window it produced - the samples in S3, the row in `RespirationWindow`.
+This repo reads those objects (`phase.sources`) and asks production's own
+`calculate_inhale_exhale_time` what it calls on them (`phase.production`, on `holosissystem`
+directly). That is the whole build: two reads and a function call, no pipeline, no scan download,
+no disk pressure.
 
 It also means the training windows are **the same objects a labeller sees**, byte for byte.
 `RespirationWindowID` travels into the manifest, so a human label written later joins straight
 onto the row the network was trained on - no re-derivation, no risk of the two describing
 different samples.
 
-To grow the set, upload more windows from the app repo:
-
-    poetry run python upload_windows.py --env ds_algo --patients SL --per-patient 20 --commit
-
-That is deliberately not done from here. Building a window and labelling a window are that
-repo's job; this one consumes what it produced.
+Growing the pool means uploading more windows, which is a write to `RespirationWindow` and is
+therefore not done from here: **this repo has no writer**.
 
 ## What the labels are, and are not
 
@@ -44,7 +41,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from phase import bridge
+from phase import production, sources
 from phase.labels import PHASES, class_counts, spans_to_targets
 
 MANIFEST_NAME = "manifest.csv"
@@ -68,20 +65,12 @@ class BuildStats:
 
 # --------------------------------------------------------------------------------- selection
 
-def catalogue(env_key: str, app_repo: str) -> pd.DataFrame:
-    """Every uploaded window with its signal and patient, as the app's sidebar sees it.
+def catalogue(env_key: str) -> pd.DataFrame:
+    """Every uploaded window with its signal and patient. See `phase.sources.catalogue`.
 
-    `db.browse` is the association: `RespirationWindow` on the labels instance merged in pandas
-    (never in SQL - on prod they are different servers) with `RadarSignal`/`Session` on the
-    device instance, keyed on `RadarSignalID`. The patient's display name is per environment -
-    a `PatientStudyName` from the labels database on `ds_algo` (`SL0066`), and
-    `Session.PatientID` on `ds_prod` (`bs-008`), which has no name column at all.
-
-    Adds `Spans`, the number of human phase records on the window. Zero is the normal case.
+    Carries `Spans`, the number of human phase records on the window. Zero is the normal case.
     """
-    frame = bridge.require_app(app_repo)["db"].browse(env_key).copy()
-    frame["Spans"] = frame["Spans"].fillna(0).astype(int)
-    return frame
+    return sources.catalogue(env_key)
 
 
 def select(catalogue_frame: pd.DataFrame, patients: list[str] | None = None,
@@ -136,7 +125,7 @@ def _patient_seed(seed: int, patient: str) -> int:
 
 # ---------------------------------------------------------------------------------- one signal
 
-def windows_of_signal(env_key: str, signal_id: int, app_repo: str,
+def windows_of_signal(env_key: str, signal_id: int, rows: pd.DataFrame,
                       requires_rate: bool = True) -> list[dict[str, Any]]:
     """One signal's stored windows, each with its samples and the algorithm's phases on them.
 
@@ -148,18 +137,16 @@ def windows_of_signal(env_key: str, signal_id: int, app_repo: str,
     dropped - "the algorithm found nothing here" is a training signal, and dropping those windows
     would bias the set towards easy breathing.
     """
-    bundle = bridge.require_app(app_repo)
-    rows = bundle["db"].windows_for_signal(env_key, int(signal_id))
     out = []
-    for _, row in rows.iterrows():
-        t_sec, values = bundle["waveforms"].window_samples(str(row["WaveformS3Path"]))
+    for _, row in rows.sort_values("WindowIndex").iterrows():
+        t_sec, values = sources.window_samples(str(row["WaveformS3Path"]))
         values = np.asarray(values, dtype=np.float32)
         if not values.size:
             continue
         rate = None if pd.isna(row.get("RespirationRate")) else float(row["RespirationRate"])
         fps = float(row["AnalysisFps"])
         spans, note = ([], "no stored rate") if (requires_rate and not rate) else \
-            bundle["suggestion"].suggest(values, rate, fps)
+            production.phases_for(values, rate, fps)
         out.append({
             "window_id": int(row["ID"]),
             "window_index": int(row["WindowIndex"]),
@@ -212,7 +199,7 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
 
 # --------------------------------------------------------------------------------- the build
 
-def build(env_key: str, out_dir: Path, app_repo: str, patients: list[str] | None = None,
+def build(env_key: str, out_dir: Path, patients: list[str] | None = None,
           signals: list[int] | None = None, per_patient: int | None = None,
           unlabelled_only: bool = False, seed: int = 0, requires_rate: bool = True,
           limit: int | None = None, log=print) -> tuple[pd.DataFrame, BuildStats]:
@@ -226,8 +213,7 @@ def build(env_key: str, out_dir: Path, app_repo: str, patients: list[str] | None
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen = select(catalogue(env_key, app_repo), patients, signals, per_patient,
-                    unlabelled_only, seed)
+    chosen = select(catalogue(env_key), patients, signals, per_patient, unlabelled_only, seed)
     if chosen.empty:
         log("no uploaded windows match that selection")
         return rebuild_manifest(out_dir), BuildStats()
@@ -247,7 +233,9 @@ def build(env_key: str, out_dir: Path, app_repo: str, patients: list[str] | None
             stats.signals_built += 1
             continue
         try:
-            windows = windows_of_signal(env_key, signal_id, app_repo, requires_rate)
+            windows = windows_of_signal(env_key, signal_id,
+                                        chosen[chosen["RadarSignalID"] == signal_id],
+                                        requires_rate)
         except Exception as error:                                        # noqa: BLE001
             stats.signals_failed += 1
             stats.failures.append(f"{signal_id}: {type(error).__name__}: {error}")

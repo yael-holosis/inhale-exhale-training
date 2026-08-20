@@ -38,7 +38,7 @@ import torch
 from omegaconf import OmegaConf
 
 from models.lightning_module import PhaseSegmenter
-from phase import bridge
+from phase import sources
 from phase.decode import decode
 from phase.labels import PHASES, spans_to_targets
 from phase.metrics import event_level, per_sample, phase_durations
@@ -116,26 +116,21 @@ def on_fold(args, cfg) -> int:
 
 def on_human(args, cfg) -> int:
     """Every window in the dataset that also carries human spans, scored three ways."""
-    bundle = bridge.require_app(str(cfg.repos.labeling_app))
     manifest = load_manifest(cfg)
     root = Path(cfg.data.dir)
 
     rows = []
     for env, group in manifest.groupby("env"):
-        # `Spans` is the count of phase records on the window. The app's `browse` frame has no
-        # boolean "labelled" column - filtering on the wrong one silently scores every window.
-        catalogue = bundle["db"].browse(str(env))
-        labelled = catalogue.loc[catalogue["Spans"].fillna(0) > 0, "ID"].astype(int)
+        # `Spans` is the count of phase records on the window. There is no boolean "labelled"
+        # column - filtering on one that is not there silently scores every window.
+        catalogue = sources.catalogue(str(env))
+        labelled = catalogue.loc[catalogue["Spans"] > 0, "ID"].astype(int)
         wanted = group[group["RespirationWindowID"].isin(set(labelled))]
         if wanted.empty:
             continue
-        phase_ids = {str(name).lower(): int(ident) for ident, name in
-                     bundle["db"].frame(str(env), bundle["db"].LABELS,
-                                        "SELECT ID, Name FROM BreathPhaseType").itertuples(
-                                            index=False)}
-        names = {ident: name for name, ident in phase_ids.items()}
+        names = sources.phase_vocabulary(str(env))
         for _, row in wanted.iterrows():
-            spans = bundle["db"].spans_for_window(str(env), int(row["RespirationWindowID"]))
+            spans = sources.human_spans(str(env), int(row["RespirationWindowID"]))
             if spans.empty:
                 continue
             values, teacher = window_samples(root, row)

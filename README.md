@@ -4,11 +4,14 @@ Train a per-sample **inhale / exhale / stop / unknown** segmenter on radar respi
 waveforms, at 10 fps, any length in and one class per sample out. Small enough for the edge
 device: 18,188 parameters at the default shape.
 
-The first training set is **the production algorithm's own output**, over the windows that
-[`respiration-phase-labeling`](https://github.com/Holosis-Health/respiration-phase-labeling) -
-the labelling app - has already uploaded. Human labelling there is under way but still small: of
-1,933 uploaded windows on `ds_algo`, **21 carry a human span**. So the network starts by learning
-what the device already does, and moves onto human labels as they arrive.
+The training set is **the production algorithm's own output** over the windows already stored in
+`RespirationWindow`. Human labelling is under way but still small - a few dozen windows out of
+several thousand - so the network starts by learning what the device already does, and moves onto
+human labels as they arrive.
+
+**This repo is standalone.** It reads two databases and an S3 bucket, and calls
+`holosissystem`'s own phase function. It imports no sibling checkout, writes nothing anywhere,
+and `tests/test_standalone.py` fails if either stops being true.
 
 ## Read this before quoting a number
 
@@ -55,35 +58,30 @@ the window blobs in S3 and the call into production's phase calculation, and it 
 
 ### Credentials and profiles
 
-**This repo defines none of them.** There is no `aws:` block in `parameter/`, no secret name and
-no profile - every connection is opened by `respiration-phase-labeling/utils/db.py` and
-`building.scan_reader`, from that repo's `parameters/parameters.yaml`. It is stated here only so
-nobody goes looking for a second copy.
+All of it is in `parameter/sources/default.yaml`, and **no password is in this repo**.
+Credentials come from Secrets Manager through `holosis_aws_manager`; a test fails the build if a
+`password:` key ever appears in a tracked file.
 
-| | `ds_algo` (SL, sleep lab) | `ds_prod` (bs- / RM- pilots) |
+| | `ds_algo` (SL, sleep lab) | `ds_prod` (pilots) |
 | --- | --- | --- |
-| Signals + patients | data-science MySQL, Secrets Manager `sm-data-science-01-db-password-mysql-6g2w8dxe`, db `edge_data` | **production's** MySQL, user `edge_data_user_ro`, db `edge_data` |
-| Human labels | same server, db `edge_data_extras` | data-science replica, Secrets Manager `sm-data-science-01-db-password-edge-data-endpoint-0owgu5br` |
-| Raw scans | profile `holosis-datascience-algo`, bucket `s3-data-science-01-holosis-health-system-sessions` | profile `holosis-prod-admin`, bucket `s3-prod-01-holosis-health-system-sessions` |
+| Windows + labels | data-science MySQL, SM `sm-data-science-01-db-password-mysql-6g2w8dxe`, db `edge_data_extras` | data-science replica, SM `sm-data-science-01-db-password-edge-data-endpoint-0owgu5br` |
+| Signals + patients | same server, db `edge_data` | **production's** MySQL, user `edge_data_user_ro`, read only |
+| Window samples | \multicolumn - one bucket for both: `s3-data-science-01-holosis-health-system-sessions` | |
 
-Two things follow from that table:
-
-- **The scan buckets are in different accounts**, and the data-science profile gets a 403 on
-  production's. `scan_reader` switches the process's `AWS_PROFILE` to reach them, which is why
-  the two cohorts are two runs and not one.
 - **Production is read-only by the server's rules**, not only by ours: `edge_data_user_ro` is
-  granted SELECT and nothing else. Nothing in this repo writes anywhere near it.
+  granted SELECT and nothing else. And `phase.sources.frame` refuses anything that is not a
+  read, so a writer added later fails in a test rather than on production.
+- **Production's password is not in this repo.** It is read from Secrets Manager in the
+  production account under `holosis-prod-admin`. Whoever has no access there sets
+  `INHALE_EXHALE_TRAINING_PROD_RO_PASSWORD`, or drops it in `secrets/` - see
+  [secrets/README.md](secrets/README.md).
+- The two sides of an environment **never join in SQL**. On prod they are different servers, so
+  the window and signal frames are merged in pandas and one code path serves both instances.
 
-Production's read-only database password is carried **in plaintext** in the labelling repo's
-tracked `parameters/parameters.yaml`, and therefore in its git history. That is a deliberate
-choice made there and documented there - most labellers have no Secrets Manager access in the
-production account, and the app was unusable for them without it - but it is now a dependency of
-this repo too, so it is named rather than left to be discovered. `RESPIRATION_PHASE_LABELING_PROD_RO_PASSWORD`
-or `secrets/prod_edge_ro_password.txt` override it if it is ever moved out.
+`build_dataset.py` signs in for you if the session has expired; to do it by hand:
 
 ```bash
 aws sso login --profile holosis-datascience-algo
-aws sso login --profile holosis-prod-admin        # ds_prod only
 ```
 
 ## Building the dataset
@@ -94,29 +92,26 @@ poetry run python build_dataset.py --env ds_algo               # the SL sleep-la
 poetry run python build_dataset.py --env ds_prod               # the pilots
 ```
 
-**No raw scan is read.** The app repo already ran the production pipeline when it uploaded these
-windows; this reads each window's samples from S3 and asks production's own
-`calculate_inhale_exhale_time` what it calls on them. Two reads and a function call - about 4.5 s
-per signal, and no disk pressure at all.
+**No raw scan is read.** The pipeline already ran when these windows were uploaded; this reads
+each window's samples from S3 (`phase/sources.py`) and asks production's own
+`calculate_inhale_exhale_time` what it calls on them (`phase/production.py`, straight onto
+`holosissystem`). Two reads and a function call - about 1.7 s per signal, and no disk pressure.
 
 That also means the training windows are **the same objects a labeller sees**, byte for byte.
 `RespirationWindowID` goes into the manifest, so a human label written later joins straight onto
 the row the network trained on, with no re-derivation and no risk of the two describing different
 samples.
 
-**To grow the pool, upload more windows from the app repo.** Building a window is its job:
+**To grow the pool, more windows have to be uploaded to `RespirationWindow`.** That is a write,
+and this repo has no writer - by design.
 
-```bash
-poetry run python upload_windows.py --env ds_algo --patients SL --per-patient 20 --commit
-```
+**Two cohorts, two runs, one directory.** `ds_algo` is the data-science instance with the `SL`
+sleep-lab nights; `ds_prod` is the pilots. Their `RadarSignal` ID spaces are unrelated - signal
+2120091 is a different recording on each - so a shard is named `<env>_signal_<id>.npz` and the
+manifest is rebuilt from every shard present.
 
-**Two cohorts, two runs, one directory.** `ds_algo` is the data-science instance, where the `SL`
-sleep-lab nights are and where nearly every uploaded window lives; `ds_prod` is the pilots. Their
-`RadarSignal` ID spaces are unrelated - signal 2120091 is a different recording on each - so a
-shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from every shard present.
-
-**Resumable**, and it costs nothing to be: a window blob is immutable once uploaded, because the
-app repo refuses to overwrite one that labels already point at.
+**Resumable**, and it costs nothing to be: a window blob is immutable once uploaded, so a shard
+already on disk can never be stale.
 
 ## Training
 
@@ -222,14 +217,16 @@ The repo root holds only things you can run.
 - `train.py` - one fold, Hydra + Lightning + ClearML.
 - `evaluate.py` - a checkpoint against the algorithm's labels, or against human ones.
 - `clearml_utils.py` - the same wiring as `cough`; no credentials in the repo.
-- `parameter/` - the Hydra config tree.
-- `phase/` - `bridge` (reach the two repos), `labels` (the vocabulary), `building` (the
-  dataset), `dataset`, `splits`, `decode`, `metrics`.
+- `parameter/` - the Hydra config tree, plus `sources/default.yaml` (databases, bucket, tables).
+- `phase/` - `sources` (the two databases and S3), `production` (production's phase call and the
+  pairing of its boundary arrays), `labels` (the vocabulary), `building` (the dataset), `dataset`,
+  `splits`, `decode`, `metrics`.
 
-**Two directory names are load-bearing.** The labelling repo calls its package `utils` and its
-config `parameters`, and both checkouts sit on `sys.path` during a build - so this repo uses
-`phase/` and `parameter/`. Rename either back and every `from utils import ...` inside that repo
-silently resolves to one of ours. `tests/test_bridge.py` fails if it happens.
+`phase/production.py` is the file to watch. It is a faithful port of the phase call and span
+pairing that `inhale-exhale-detection` validated, running against `holosissystem` directly - and
+it was checked window for window against that implementation before the dependency was cut
+(60/60 identical labels on real windows). If the upstream phase code changes, that file has to
+follow it.
 - `models/` - `unet1d`, `lightning_module`.
 - `tests/` - 46 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
   for a smoke run:
@@ -242,16 +239,15 @@ DISABLE_CLEARML=true poetry run python train.py \
 
 ## Open
 
-- **The pool is the uploaded windows, and it is small**: 1,933 on `ds_algo` over 293 signals and
-  19 `SL` patients, 45 on `ds_prod` over 5 signals of one patient. Roughly 11 hours of trace in
-  total. Growing it is an `upload_windows.py` run in the app repo, not a change here.
-- **`ds_prod` is one patient.** Every pilot cohort - 44 patients, 65,671 eligible signals - is
-  reachable, but only `bs-008` has had windows built. Until more are uploaded, the pilots are not
-  represented in training at all.
+- **The pool is whatever has been uploaded, and it grows under you.** Measured 2026-08-20:
+  1,933 windows on `ds_algo` (293 signals, 19 `SL` patients) and 915 on `ds_prod` (113 signals,
+  11 `bs-` patients) - 2,848 windows, 16.3 hours. `ds_prod` went from 45 windows to 915 during a
+  single afternoon's work, so re-read the catalogue rather than quoting a number from here.
+- **Human labels are the scarce thing**: 23 windows on `ds_algo`, 6 on `ds_prod`. Enough to sanity
+  check a model, nowhere near enough to train or to fine-tune on.
 - **The two instances differ in acquisition.** `ds_algo`'s eligible signals are ~51% 300 fps
-  two-antenna and 49% 200 fps; `ds_prod` is 100% 200 fps. The preprocessing differs between them,
-  so a model trained on one cohort is not obviously transferable to the other - worth measuring
-  before assuming.
+  two-antenna and 49% 200 fps; `ds_prod` is 100% 200 fps. The preprocessing differs, so a model
+  trained on one cohort is not obviously transferable to the other - worth measuring.
 - Whether breath shape alone settles direction under the polarity flip. If it does not, the
   phase anchor becomes a second input channel.
 - Whether the human set is large enough for a fine-tune rather than only an evaluation.

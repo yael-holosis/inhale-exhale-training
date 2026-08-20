@@ -9,3 +9,7 @@ logs/
 lightning_logs/
 checkpoints/
 clearml.conf
+
+# Local credentials - see secrets/README.md. Never commit a password.
+secrets/*
+!secrets/README.md

@@ -33,10 +33,8 @@ Options
 
 `--limit N`   Stop after N signals. For a first look.
 
-To make the pool bigger, upload more windows **from the app repo** - building a window is its
-job, not this one's:
-
-    poetry run python upload_windows.py --env ds_algo --patients SL --per-patient 20 --commit
+The pool is whatever is in `RespirationWindow`. Growing it means uploading more windows, which
+is a write - and **this repo has no writer**, by design. Reads only, both instances.
 """
 
 from __future__ import annotations
@@ -48,7 +46,7 @@ from pathlib import Path
 import yaml
 from omegaconf import OmegaConf
 
-from phase import bridge
+from phase import production, sources
 from phase.building import SUMMARY_NAME, build, catalogue
 from phase.labels import PHASES
 
@@ -78,8 +76,8 @@ def parse_args(cfg):
     return parser.parse_args()
 
 
-def show_catalogue(env_key: str, app_repo: str) -> int:
-    frame = catalogue(env_key, app_repo)
+def show_catalogue(env_key: str) -> int:
+    frame = catalogue(env_key)
     if frame.empty:
         print(f"no windows uploaded on {env_key}")
         return 1
@@ -98,21 +96,19 @@ def show_catalogue(env_key: str, app_repo: str) -> int:
 def main() -> int:
     cfg = load_config()
     args = parse_args(cfg)
-    app_repo = str(cfg.repos.labeling_app)
-
-    bundle, reason = bridge.labeling_app(app_repo)
-    if bundle is None:
-        print(f"cannot build: {reason}")
+    if not sources.ensure_session():
+        print(f"cannot reach AWS as {sources.profile()} - "
+              f"run: aws sso login --profile {sources.profile()}")
         return 1
     if args.catalogue:
-        return show_catalogue(args.env, app_repo)
+        return show_catalogue(args.env)
 
     patients = args.patients if args.patients is not None else list(cfg.data.patients or [])
     out_dir = Path(args.out or cfg.data.dir)
     print(f"env {args.env} | patients {patients or 'all'} "
           f"| per-patient {args.per_patient or 'all'} -> {out_dir}")
 
-    manifest, stats = build(env_key=args.env, out_dir=out_dir, app_repo=app_repo,
+    manifest, stats = build(env_key=args.env, out_dir=out_dir,
                             patients=patients or None, signals=args.signals,
                             per_patient=args.per_patient,
                             unlabelled_only=args.unlabelled_only, seed=args.seed,
@@ -143,7 +139,7 @@ def main() -> int:
             "per_class_fraction": {name: round(count / samples, 4)
                                    for name, count in per_class.items()},
         },
-        "versions": bridge.versions(),
+        "holosissystem": production.version(),
     }
     with open(out_dir / SUMMARY_NAME, "w") as handle:
         yaml.safe_dump(summary, handle, sort_keys=False)

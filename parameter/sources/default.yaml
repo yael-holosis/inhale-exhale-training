@@ -1,0 +1,73 @@
+# Where the windows and their labels are read from. Two instances, and nothing is ever written
+# to either - this repo has no writer at all.
+#
+# Each environment has a **labels** connection, holding RespirationWindow and
+# BreathPhaseTimeRecord, and a **device** connection, holding RadarSignal / Session / Patient.
+# On the algo instance those are the same server. On prod they are not, which is the whole
+# reason they are separate: signals and patients are read from production's own MySQL while the
+# window rows live on the data-science replica. The two never join in SQL - they are merged in
+# pandas - because on prod they are different machines.
+#
+# The schema carries no environment column: the instance a row lives on IS its environment.
+
+aws:
+  # Which profile a person has for the data-science account is a fact about their laptop, so it
+  # is overridable without editing this file.
+  profile_env_var: INHALE_EXHALE_TRAINING_AWS_PROFILE
+  profile: holosis-datascience-algo
+  region: us-east-1
+
+s3:
+  # One bucket for both environments, in the data-science account. RespirationWindow's
+  # WaveformS3Path is stored bucket-relative, so the bucket is named here rather than in the
+  # column.
+  bucket: s3-data-science-01-holosis-health-system-sessions
+  blob_time_key: t_sec
+  blob_values_key: waveform
+
+environments:
+  ds_algo:
+    label: DS - algo
+    labels:
+      secret_name: sm-data-science-01-db-password-mysql-6g2w8dxe
+      database: edge_data_extras
+    device:
+      secret_name: sm-data-science-01-db-password-mysql-6g2w8dxe
+      database: edge_data
+      # Patient identity here is a study name (SL0066) on the Patient table, which lives in the
+      # *labels* database - so it is a second read and a pandas merge, not a join.
+      patient_table_in: labels
+      patient_name_column: PatientStudyName
+  ds_prod:
+    label: DS - prod
+    labels:
+      secret_name: sm-data-science-01-db-password-edge-data-endpoint-0owgu5br
+      database: edge_data_extras
+    device:
+      # Production's own MySQL, through a read-only account. `edge_data_user_ro` is granted
+      # SELECT and nothing else, so production is read-only by the server's rules rather than
+      # only by ours.
+      #
+      # **No password is stored in this repo.** It is read from Secrets Manager in the
+      # production account, under the profile named below. Whoever has no Secrets Manager
+      # access there sets the environment variable instead - the labelling app carries the
+      # value in a tracked file for exactly that reason, and this repo deliberately does not.
+      host: rds-prod-01-mysql.ccpoaom8exlh.us-east-1.rds.amazonaws.com
+      user: edge_data_user_ro
+      password_env_var: INHALE_EXHALE_TRAINING_PROD_RO_PASSWORD
+      password_file: secrets/prod_edge_ro_password.txt
+      secret_name: sm-prod-01-clinical-dashboard-edge-ro
+      secret_profile: holosis-prod-admin
+      database: edge_data
+      read_only: true
+      # Prod has no name column - Session.PatientID (bs-008, HOL-001) *is* the identity there.
+      patient_table_in: device
+      patient_name_column: null
+
+tables:
+  window: RespirationWindow
+  phase_type: BreathPhaseType
+  phase_record: BreathPhaseTimeRecord
+  radar_signal: RadarSignal
+  session: Session
+  patient: Patient
