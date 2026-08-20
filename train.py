@@ -31,7 +31,7 @@ from models.lightning_module import PhaseSegmenter
 from phase import figures
 from phase.building import load_windows, resolve
 from phase.decode import decode
-from phase.dataset import WindowDataset, class_weights, collate
+from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
 from phase.labels import PHASES
 from phase.splits import SPLIT_COLUMN, describe, split_for
 
@@ -45,9 +45,16 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
                                 augment=OmegaConf.to_container(cfg.training.augmentation,
                                                                resolve=True),
                                 normalise=cfg.data.normalise, seed=cfg.seed)
-        out[name] = DataLoader(dataset, batch_size=cfg.data.batch_size, shuffle=train,
-                               num_workers=cfg.data.num_workers, drop_last=train,
-                               collate_fn=collate,
+        # Batches of one length, so nothing is padded and BatchNorm never sees a padded
+        # position. `collate` still pads, because the last batch of a length group can be short
+        # and because a caller may want plain batching.
+        # `drop_last` stays off: bucketed by length, the short batch is the whole of a rare
+        # length rather than a remainder - dropping it would discard every window of 300 samples
+        # and longer, which is the part variable-length training exists to keep.
+        sampler = LengthBucketSampler(frame["samples"].to_numpy(), cfg.data.batch_size,
+                                      shuffle=train, drop_last=False, seed=cfg.seed)
+        out[name] = DataLoader(dataset, batch_sampler=sampler,
+                               num_workers=cfg.data.num_workers, collate_fn=collate,
                                persistent_workers=cfg.data.num_workers > 0)
     return out
 

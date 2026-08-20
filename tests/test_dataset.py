@@ -165,3 +165,44 @@ def test_the_model_takes_a_ragged_batch_after_collate():
     out = collate(batch)
     logits = UNet1D(channels=(16, 24, 32), bottleneck=48)(out["x"])
     assert logits.shape == (2, 4, 450)
+
+
+def test_bucketed_batches_are_all_one_length():
+    """A batch drawn from one length group needs no padding at all."""
+    import numpy as np
+
+    from phase.dataset import LengthBucketSampler
+
+    lengths = np.array([200] * 130 + [250] * 20 + [400] * 3)
+    for batch in LengthBucketSampler(lengths, 64, shuffle=True, seed=0):
+        assert len(set(lengths[batch].tolist())) == 1
+
+
+def test_bucketing_covers_every_window_exactly_once():
+    import numpy as np
+
+    from phase.dataset import LengthBucketSampler
+
+    lengths = np.array([200] * 130 + [250] * 20 + [400] * 3)
+    seen = [index for batch in LengthBucketSampler(lengths, 64, seed=0) for index in batch]
+    assert sorted(seen) == list(range(len(lengths)))
+
+
+def test_dropping_the_last_batch_would_lose_whole_lengths_so_it_is_off_by_default():
+    """Bucketed, a short batch is the whole of a rare length rather than a remainder.
+
+    On the real set `drop_last` would discard every window of 300 samples and longer - the
+    slowest, most irregular breathing, and the reason variable-length training exists.
+    """
+    import numpy as np
+
+    from phase.dataset import LengthBucketSampler
+
+    lengths = np.array([200] * 130 + [400] * 3)
+    kept = {index for batch in LengthBucketSampler(lengths, 64, seed=0) for index in batch}
+    assert len(kept) == len(lengths)
+
+    dropped = {index for batch in LengthBucketSampler(lengths, 64, drop_last=True, seed=0)
+               for index in batch}
+    assert not any(lengths[index] == 400 for index in dropped), \
+        "drop_last silently removed an entire length group"

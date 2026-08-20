@@ -241,6 +241,43 @@ is padded to a multiple of `2 ** depth` inside `forward` and cropped back, so a 
 own length; `phase.dataset.collate` pads each batch to its own longest member and masks the
 padding, which the loss and the metrics already drop. Nothing is cropped to fit a tensor.
 
+### Batching, and what it means at inference
+
+The weights are convolution kernels and per-channel norms - `(16, 1, 9)`, `(16, 16, 1)`, `(16,)`.
+Not one of them has a length dimension, and there is no `Linear` or flatten anywhere: the head is
+a 1x1 convolution. So the same 18,188 parameters apply to a 137-sample window and a 12,000-sample
+signal, and the gradient from a batch of 200-sample windows is a gradient for the same weights a
+600-sample window will use. Length never enters the parameter shapes; only the batch tensor
+wanted a common one.
+
+**Training batches are bucketed by length** (`LengthBucketSampler`), so a batch is drawn from one
+length group and needs no padding. That is a correctness fix, not an optimisation: 94% of windows
+are exactly 200 samples, which reads as "a random batch is almost always uniform" and is not -
+with 64 to a batch the chance all of them are 200 is 1.6%, so **98% of random batches carry
+padding, averaging 40% of the tensor and 65% at worst**. That padding is masked out of the loss
+but not hidden from `BatchNorm`, which normalises over batch and length together and carries its
+statistics into inference, where no padding exists.
+
+`drop_last` is off and must stay off. Bucketed, the short batch is not a remainder - it is the
+whole of a rare length. Turning it on discards every window of 300 samples and longer: 82 of
+them, the slowest and most irregular breathing in the set.
+
+**At inference, run one window at a time - or bucket - but never mix lengths in one batch.**
+`evaluate.predict` does the former. In eval mode a batch-mate cannot change a window's answer,
+because BatchNorm uses its running statistics and nothing else crosses the batch dimension - but
+that holds only while the batch is *unpadded*. Padding a 200-sample window up to 600 puts zeros
+inside the receptive field of its own tail, and the last samples then get a different answer:
+
+```
+per-position max |difference|, a 200-sample window padded to 600
+  samples   0- 24   4.8e-07     far from the pad: identical
+  samples 100-124   7.8e-02
+  samples 175-199   1.6e+00     at the pad: a different answer
+```
+
+Beyond half a receptive field (176 samples) from the join the two are bit-identical. On the
+device this is not a constraint at all - a signal is analysed on its own, so there is no batch.
+
 `data.crop_samples` can pin a fixed length under memory pressure, but it is not the default and
 it is not free. 6.3% of windows are longer than 200 samples and they are the **hard** ones - the
 pipeline grows a window by 5 s and retries exactly when it cannot find three breaths in it, so a

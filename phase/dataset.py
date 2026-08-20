@@ -32,7 +32,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
 
 from phase.labels import SWAP_ON_FLIP, UNKNOWN
 
@@ -185,8 +185,12 @@ def collate(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
     a held breath, and although it is masked out of the loss it still enters the receptive field
     of the samples before it. Zeros after a mean-removed window are its own baseline.
 
-    No length bucketing. On this set 94% of windows are exactly 200 samples, so a random batch is
-    almost always uniform already and sorting by length would buy padding it does not spend.
+    **Use `LengthBucketSampler` with this.** 94% of windows are exactly 200 samples, which reads
+    as "a random batch is almost always uniform" and is not: with 64 to a batch, the chance every
+    one of them is 200 is 1.6%, so 98% of batches are padded and the padding averages 40% of the
+    tensor - 65% at worst. That padding is masked out of the loss, but it is *not* hidden from
+    `BatchNorm`, which normalises over batch and length together and carries its statistics into
+    inference where no padding exists. Bucketing removes the cause instead of compensating for it.
     """
     longest = max(int(item["x"].shape[-1]) for item in batch)
     x = torch.zeros(len(batch), batch[0]["x"].shape[0], longest)
@@ -199,6 +203,59 @@ def collate(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         mask[position, :length] = item["mask"]
     return {"x": x, "y": y, "mask": mask,
             "row": torch.tensor([int(item["row"]) for item in batch])}
+
+
+class LengthBucketSampler(Sampler):
+    """Batches drawn from windows of one length, so a batch needs no padding at all.
+
+    Windows come in a handful of discrete lengths - the pipeline's 20 s window, plus the ones it
+    grew by 5 s and retried - so grouping by length is exact rather than approximate, and only
+    the last batch of each group is short.
+
+    Shuffled twice: within a length group, and over the batches themselves. Without the second,
+    every epoch would feed all 2,669 plain windows and then all 96 of the 250-sample ones, which
+    is a curriculum nobody chose and a `BatchNorm` update history to match.
+
+    **`drop_last` is a trap here and defaults off.** Dropping the short final batch is the usual
+    way to avoid an unstable last step, but once batches are bucketed by length the short batch
+    is not a remainder - it *is* the whole of a rare length. Measured on the built set, dropping
+    it would discard every window of 300 samples and longer: 82 of them, the slowest and most
+    irregular breathing in the set, and the part `crop_samples: null` exists to keep. A batch of
+    one 600-sample window still gives BatchNorm 600 positions per channel, which is not an
+    unstable estimate.
+    """
+
+    def __init__(self, lengths, batch_size: int, shuffle: bool = True, drop_last: bool = False,
+                 seed: int = 0):
+        # See the note above: bucketed, a short batch is a whole rare length, not a remainder.
+        self.lengths = np.asarray(lengths)
+        self.batch_size = int(batch_size)
+        self.shuffle = bool(shuffle)
+        self.drop_last = bool(drop_last)
+        self.seed = int(seed)
+        self.epoch = 0
+
+    def _batches(self) -> list[list[int]]:
+        rng = np.random.default_rng(self.seed + self.epoch)
+        batches = []
+        for length in np.unique(self.lengths):
+            positions = np.flatnonzero(self.lengths == length)
+            if self.shuffle:
+                positions = positions[rng.permutation(positions.size)]
+            for start in range(0, positions.size, self.batch_size):
+                chunk = positions[start:start + self.batch_size].tolist()
+                if len(chunk) == self.batch_size or not self.drop_last:
+                    batches.append(chunk)
+        if self.shuffle:
+            batches = [batches[i] for i in rng.permutation(len(batches))]
+        return batches
+
+    def __iter__(self):
+        yield from self._batches()
+        self.epoch += 1
+
+    def __len__(self) -> int:
+        return len(self._batches())
 
 
 def class_weights(manifest: pd.DataFrame, phases, power: float = 1.0,
