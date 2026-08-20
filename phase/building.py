@@ -70,19 +70,42 @@ def dataset_dir(root: str | Path, name: str, source: str, when: str | None = Non
     return Path(root) / DIR_TEMPLATE.format(name=name, source=source, stamp=when or stamp())
 
 
-def resolve(root: str | Path, wanted: str) -> Path:
+LATEST = "latest"
+
+
+def built_at(directory: Path) -> datetime:
+    """The build stamp out of a directory name, for ordering. Unparseable sorts oldest.
+
+    Parsed rather than taken from the whole name: the name begins with the label source, so
+    sorting the strings puts every `phases_human_...` after every `phases_algorithm_...`
+    whatever their timestamps, and `latest` silently means "human". Not mtime either - that
+    moves whenever anything in the directory is rewritten, `make_splits.py` included.
+    """
+    stamp_part = directory.name.rsplit("_", 1)[-1]
+    try:
+        return datetime.strptime(stamp_part, STAMP_FORMAT).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+
+
+def resolve(root: str | Path, wanted: str, source: str | None = None) -> Path:
     """A dataset directory by name, or `latest` for the newest build under `root`.
 
-    Newest by directory name, not by mtime: the name carries the build's own start time, and an
-    mtime moves whenever anything in the directory is rewritten - `make_splits.py`, for one.
+    `source` narrows `latest` to one label source, so a `human` build sitting beside an
+    `algorithm` one does not become what everything trains on by accident.
     """
     root = Path(root)
-    if wanted and wanted != "latest":
-        return Path(wanted) if Path(wanted).is_absolute() or Path(wanted).exists() else root / wanted
-    candidates = sorted(path for path in root.glob("*") if (path / WINDOWS_NAME).exists())
+    if wanted and wanted != LATEST:
+        named = Path(wanted)
+        return named if named.is_absolute() or named.exists() else root / wanted
+    candidates = [path for path in root.glob("*") if (path / WINDOWS_NAME).exists()]
+    if source:
+        candidates = [path for path in candidates if f"_{source}_" in path.name]
     if not candidates:
-        raise FileNotFoundError(f"no dataset under {root} - run build_dataset.py first")
-    return candidates[-1]
+        raise FileNotFoundError(
+            f"no dataset under {root}" + (f" built with labels.source={source!r}" if source
+                                          else "") + " - run build_dataset.py first")
+    return max(candidates, key=built_at)
 
 
 def existing_params(directory: Path) -> dict[str, Any]:
@@ -387,12 +410,19 @@ def write_provenance(out_dir: Path, params: dict[str, Any], frame: pd.DataFrame)
     `build_params.yaml` accumulates a `runs` list, so a directory extended with a second
     environment records both invocations rather than only the last.
     """
+    import copy
+
     out_dir = Path(out_dir)
     existing = existing_params(out_dir)
     runs = list(existing.get("runs", []))
     runs.append(params)
+    # Deep-copied before dumping: `safe_dump` emits a YAML anchor for an object it has already
+    # seen, so the labels block would come out as `&id001` at the top and `*id001` in the run -
+    # valid, and unreadable.
+    document = copy.deepcopy({"labels": params["labels"],
+                              "created": existing.get("created") or params["started"],
+                              "runs": runs})
     with open(out_dir / PARAMS_NAME, "w") as handle:
-        yaml.safe_dump({"labels": params["labels"], "created": existing.get("created")
-                        or params["started"], "runs": runs}, handle, sort_keys=False)
+        yaml.safe_dump(document, handle, sort_keys=False)
     with open(out_dir / STATS_NAME, "w") as handle:
         yaml.safe_dump(summarise(frame), handle, sort_keys=False)

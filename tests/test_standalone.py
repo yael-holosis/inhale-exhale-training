@@ -98,3 +98,30 @@ def test_only_reads_are_allowed_through_the_query_helper():
 
     with pytest.raises(ReadOnly):
         frame("ds_algo", "labels", "DELETE FROM RespirationWindow")
+
+
+def test_latest_is_the_newest_build_not_the_last_name_alphabetically(tmp_path):
+    """`phases_human_...` sorts after `phases_algorithm_...` whatever the timestamps.
+
+    Sorting the names made `latest` mean "human" - it picked a 25-window evaluation set over the
+    2,848-window training set. It failed loudly, because that set had no splits yet; it would not
+    have, once both were split.
+    """
+    from phase.building import WINDOWS_NAME, resolve
+
+    for name in ("phases_algorithm_20260820T143456Z", "phases_human_20260820T120000Z"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / WINDOWS_NAME).write_text("env\n")
+
+    assert resolve(tmp_path, "latest").name == "phases_algorithm_20260820T143456Z"
+    # And narrowing to a source picks the newest of that source, not of everything.
+    assert resolve(tmp_path, "latest", "human").name == "phases_human_20260820T120000Z"
+
+
+def test_an_unbuilt_source_is_reported_rather_than_silently_falling_back(tmp_path):
+    from phase.building import WINDOWS_NAME, resolve
+
+    (tmp_path / "phases_algorithm_20260820T143456Z").mkdir()
+    (tmp_path / "phases_algorithm_20260820T143456Z" / WINDOWS_NAME).write_text("env\n")
+    with pytest.raises(FileNotFoundError, match="human"):
+        resolve(tmp_path, "latest", "human")

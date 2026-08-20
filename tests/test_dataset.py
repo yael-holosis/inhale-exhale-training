@@ -88,3 +88,39 @@ def test_rebuilding_the_manifest_preserves_an_existing_split(tmp_path):
     assert SPLIT_COLUMN in rebuilt.columns
     assert rebuilt[SPLIT_COLUMN].value_counts().to_dict() == {"train": len(frame) - 2, "test": 2}
     assert set(load_windows(tmp_path).columns) >= {SPLIT_COLUMN, "RespirationWindowID"}
+
+
+def test_a_figure_is_drawn_and_is_not_empty(tmp_path):
+    """The plotting path, end to end, without a checkpoint or AWS."""
+    from phase import figures
+
+    manifest = synthetic.build(tmp_path, n_patients=2, signals_per_patient=1,
+                               windows_per_signal=2)
+    dataset = WindowDataset(manifest, tmp_path, crop=200)
+    items = []
+    for index in range(len(dataset)):
+        values, reference = dataset._window(index)
+        prediction = reference.copy()
+        prediction[:20] = 0                       # a disagreement to draw
+        items.append({"values": values, "reference": reference, "prediction": prediction,
+                      "fps": 10.0, "title": f"window {index}",
+                      "score": figures.score(prediction, reference)})
+    path = figures.plot_windows(items[:2], tmp_path / "figure.png", "test")
+    assert path.exists() and path.stat().st_size > 10_000
+
+
+def test_spread_takes_the_worst_and_the_best():
+    from phase import figures
+
+    scored = [{"score": value} for value in (0.1, 0.5, 0.9, 0.3, 0.7)]
+    chosen = figures.choose(scored, 3, figures.SPREAD)
+    assert [item["score"] for item in chosen] == [0.1, 0.5, 0.9]
+    assert [item["score"] for item in figures.choose(scored, 2, figures.WORST)] == [0.1, 0.3]
+    assert [item["score"] for item in figures.choose(scored, 2, figures.BEST)] == [0.9, 0.7]
+
+
+def test_choosing_more_than_there_are_is_not_an_error():
+    from phase import figures
+
+    assert len(figures.choose([{"score": 0.5}], 10, figures.SPREAD)) == 1
+    assert figures.choose([], 5) == []

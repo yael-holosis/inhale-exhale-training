@@ -59,7 +59,7 @@ def main() -> int:
                         help="overwrite an existing assignment")
     args = parser.parse_args()
 
-    directory = resolve(cfg.data.root, args.dataset)
+    directory = resolve(cfg.data.root, args.dataset, cfg.data.labels.source)
     frame = load_windows(directory)
     already = [c for c in frame.columns if c == SPLIT_COLUMN or c.endswith("_split")]
     if already and not args.force:

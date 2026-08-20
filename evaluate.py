@@ -1,6 +1,7 @@
 """Score a checkpoint - on the algorithm-labelled held-out fold, or against human labels.
 
     poetry run python evaluate.py --checkpoint outputs/.../best-epoch=41.ckpt
+    poetry run python evaluate.py --checkpoint ... --plot 6
     poetry run python evaluate.py --checkpoint ... --human
 
 **The two runs answer different questions.**
@@ -24,6 +25,10 @@ Nothing is re-derived for the comparison. The samples come from the shard the ne
 against, the teacher's labels are the ones stored in it, and the human spans are joined on
 `RespirationWindowID`. All three therefore describe the same array, which is the only way the
 three rows are comparable.
+
+`--plot N` draws N test windows to `out/test_windows/`. **Sampled as a spread by default** -
+worst, median, best - because a page of randomly drawn windows on a set this size is mostly
+median ones, and hides both tails. `--plot-pick worst` when a number needs explaining.
 """
 
 from __future__ import annotations
@@ -38,9 +43,9 @@ import torch
 from omegaconf import OmegaConf
 
 from models.lightning_module import PhaseSegmenter
-from phase import sources
+from phase import figures, sources
 from phase.decode import decode
-from phase.labels import PHASES, spans_to_targets
+from phase.labels import PHASES, UNKNOWN, spans_to_targets
 from phase.building import load_windows, resolve
 from phase.metrics import event_level, per_sample, phase_durations
 from phase.splits import split_for
@@ -84,7 +89,32 @@ def report(name: str, pred: np.ndarray, truth: np.ndarray) -> dict[str, float]:
 
 
 def dataset_of(cfg, override: str | None = None) -> Path:
-    return resolve(cfg.data.root, override or cfg.data.dir)
+    return resolve(cfg.data.root, override or cfg.data.dir, cfg.data.labels.source)
+
+
+def collect(model, root: Path, frame: pd.DataFrame) -> list[dict]:
+    """Every window of a split, with its samples, its reference and the model's answer."""
+    out = []
+    for _, row in frame.iterrows():
+        values, reference = window_samples(root, row)
+        prediction = predict(model, values)
+        out.append({"values": values, "reference": reference, "prediction": prediction,
+                    "fps": float(row["analysis_fps"]), "row": row,
+                    "score": figures.score(prediction, reference)})
+    return out
+
+
+def draw(items: list[dict], out_dir: Path, name: str, heading: str, how: str, n: int,
+         seed: int, reference_name: str) -> Path | None:
+    chosen = figures.choose(items, n, how, seed)
+    if not chosen:
+        return None
+    panels = [{**item,
+               "title": (f"{item['row']['PatientID']} · window "
+                         f"{int(item['row']['RespirationWindowID'])} · "
+                         f"{item['row']['env']} · macro F1 {item['score']:.2f}")}
+              for item in chosen]
+    return figures.plot_windows(panels, Path(out_dir) / name, heading, reference_name)
 
 
 def on_fold(args, cfg) -> int:
@@ -95,11 +125,9 @@ def on_fold(args, cfg) -> int:
           f"{test['PatientID'].nunique()} held-out patients")
 
     model = load_model(args.checkpoint)
-    preds, truths = [], []
-    for _, row in test.iterrows():
-        values, target = window_samples(root, row)
-        preds.append(predict(model, values))
-        truths.append(target)
+    items = collect(model, root, test)
+    preds = [item["prediction"] for item in items]
+    truths = [item["reference"] for item in items]
 
     fps = float(test["analysis_fps"].median())
     print("\nagainst production's own labels - this measures imitation, not correctness:")
@@ -109,6 +137,36 @@ def on_fold(args, cfg) -> int:
         durations = phase_durations(labels, fps)
         print(f"  {name:8s} " + "  ".join(f"{key}={value:.2f}"
                                           for key, value in durations.items()))
+
+    scores = np.array([item["score"] for item in items])
+    # Split on whether the reference says anything at all. A window the detector found nothing in
+    # is all `unknown`, so any phase the model calls there scores zero by construction - pooling
+    # those with the rest reports a disagreement with an absent opinion as a modelling error.
+    labelled = np.array([bool(item["row"]["n_spans"] > 0) for item in items])
+    print(f"\nper-window macro F1 over {len(scores)} test windows: "
+          f"median {np.median(scores):.2f}, worst {scores.min():.2f}, best {scores.max():.2f}")
+    if labelled.any():
+        print(f"  reference has phases ({labelled.sum():4d} windows): "
+              f"median {np.median(scores[labelled]):.2f}, "
+              f"{100 * (scores[labelled] < 0.5).mean():.0f}% below 0.50")
+        report("  pooled over those", np.concatenate([i["prediction"] for i, keep
+                                                      in zip(items, labelled) if keep]),
+               np.concatenate([i["reference"] for i, keep in zip(items, labelled) if keep]))
+    if (~labelled).any():
+        called = np.array([(item["prediction"] != UNKNOWN).mean()
+                           for item, keep in zip(items, labelled) if not keep])
+        print(f"  reference all unknown ({(~labelled).sum():4d} windows): the detector found "
+              f"nothing in them, so every score here is 0.00 by construction.")
+        print(f"      the model calls a phase on {100 * called.mean():.0f}% of their samples. "
+              f"Whether it is right is not something the algorithm can answer - it is the case "
+              f"for human labels.")
+
+    if args.plot:
+        path = draw(items, Path(cfg.out_dir) / "test_windows",
+                    f"{Path(args.checkpoint).stem}_fold{args.fold}_{args.plot_pick}.png",
+                    f"fold {args.fold} test set · {args.plot_pick} of {len(items)} windows",
+                    args.plot_pick, args.plot, cfg.seed, "the production algorithm")
+        print(f"\n{path}")
     return 0
 
 
@@ -169,6 +227,10 @@ def main() -> int:
     parser.add_argument("--fold", type=int, default=None)
     parser.add_argument("--dataset", default=None,
                         help="which dataset directory - a checkpoint outlives a config edit")
+    parser.add_argument("--plot", type=int, default=0, metavar="N",
+                        help="draw N test windows to out/test_windows/")
+    parser.add_argument("--plot-pick", choices=list(figures.PICKS), default=figures.SPREAD,
+                        help="which N: spread (worst..best), worst, best, or random")
     args = parser.parse_args()
 
     root = OmegaConf.load(CONFIG_DIR / "config.yaml")

@@ -16,6 +16,14 @@ clearml:
   enabled: true
   timeout_s: 10
 
+# Figures drawn beside the metrics. A macro F1 does not say whether the breaths came out as
+# breaths, and nobody goes back to draw a page for a run that looked fine at the time.
+plot:
+  windows: 6
+  # Which windows: `spread` takes worst / median / best so a page shows the range rather than a
+  # flattering sample of it. Also `worst`, `best`, `random`. Zero above turns figures off.
+  pick: spread
+
 seed: 20260820
 out_dir: out
 

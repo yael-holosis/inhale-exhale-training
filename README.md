@@ -130,9 +130,29 @@ already on disk can never be stale.
 | What it measures | imitation of the current algorithm | correctness |
 
 `algorithm` is what there is enough of to train on, and it is **distillation**: the ceiling is the
-current algorithm, its boundaries are the 10% and 90% amplitude crossings rather than phase
-durations, and it emits no phase for the turn from inhale to exhale - so `unknown` sits
-structurally at the crest of most breaths. `human` is the real target and is what the set becomes
+current algorithm, and its boundaries are the 10% and 90% amplitude crossings rather than phase
+durations.
+
+**Every sample gets a class.** The detector returns spans, not a covering, so whatever it does not
+claim is `unknown` - there are no gaps and no unlabelled samples in the dataset. Three things end
+up there, and they are worth telling apart:
+
+```
+window 49, first 60 samples   (. unknown, I inhale, E exhale, S stop)
+.....IIIII....EEEEEEEEESSSSSIIIIII..EEEEEEEEEESSSIIIIIIIII..
+^^^^^      ^^^^                   ^^
+edges      the crest              between breaths
+```
+
+- **The crest of every breath.** Production emits no phase for the turn from inhale to exhale, so
+  `unknown` is structural there rather than a sign of a bad window.
+- **Window edges**, before the first boundary and after the last.
+- **Whole windows the detector found nothing in** - 248 of 2,848, kept deliberately. "The
+  algorithm found nothing here" is a training signal, and dropping them would bias the set
+  towards easy breathing.
+
+That makes `unknown` 26.4% of the samples inside labelled windows and 32.9% overall. Anything
+reading it as "no breathing" will be wrong most of the time it fires. `human` is the real target and is what the set becomes
 once enough windows carry a label.
 
 A directory holds **one** source. `--into` refuses to mix them: two different targets in one
@@ -196,11 +216,17 @@ A server that does not answer downgrades the run to local logging rather than ki
 
 ## The model
 
-1D U-Net, shaped after **U-Time** (Perslev et al., *A Fully Convolutional Network for Time
-Series Segmentation Applied to Sleep Staging*, NeurIPS 2019, [arXiv:1910.11162](https://arxiv.org/abs/1910.11162)),
-with depthwise-separable convolutions in place of dense ones. Related: **U-Sleep** (Perslev et
-al., npj Digital Medicine 4:72, 2021), the same architecture at sub-epoch resolution, and
-**RespNet** (Ravichandran et al., EMBC 2019), a 1D U-Net on the respiration waveform itself.
+1D U-Net with depthwise-separable convolutions in place of dense ones, shaped after **U-Time**.
+
+### References
+
+| Paper | Why it is the reference |
+| --- | --- |
+| Perslev, Jensen, Darkner, Jennum, Igel, **"U-Time: A Fully Convolutional Network for Time Series Segmentation Applied to Sleep Staging"**, NeurIPS 2019 — [arXiv:1910.11162](https://arxiv.org/abs/1910.11162) | The architecture this one is a scaled-down copy of. Fully convolutional encoder/decoder emitting one class per input sample, no recurrence, no fixed input length - exactly the shape of this problem. |
+| Perslev, Darkner, Kempfner, Nikolic, Jennum, Igel, **"U-Sleep: resilient high-frequency sleep staging"**, npj Digital Medicine 4:72 (2021) — [doi:10.1038/s41746-021-00440-5](https://doi.org/10.1038/s41746-021-00440-5) · [open access](https://www.nature.com/articles/s41746-021-00440-5) | The same net at sub-epoch resolution, trained across many cohorts without per-dataset tuning. The evidence that this shape generalises across acquisition setups, which is the `ds_algo` / `ds_prod` question here. |
+| Ravichandran, Murugesan, Balakarthikeyan, Ram, Preejith, Joseph, Sivaprakasam, **"RespNet: A deep learning model for extraction of respiration from photoplethysmogram"**, EMBC 2019 — [arXiv:1902.04236](https://arxiv.org/abs/1902.04236) | A 1D U-Net on the respiration waveform itself rather than on EEG. Nearest published work by signal type. |
+| Ronneberger, Fischer, Brox, **"U-Net: Convolutional Networks for Biomedical Image Segmentation"**, MICCAI 2015 — [arXiv:1505.04597](https://arxiv.org/abs/1505.04597) | The original, for the skip-connection idea the whole family rests on. |
+| Bai, Kolter, Koltun, **"An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling"**, 2018 — [arXiv:1803.01271](https://arxiv.org/abs/1803.01271) | The dilated TCN, the alternative below if the device ever needs causal streaming. |
 
 | Shape | Parameters | Receptive field |
 | --- | --- | --- |
@@ -211,9 +237,8 @@ The default sees a whole 20 s window plus margin; the deeper one is for running 
 signal. Both are under 150 KB in fp32 and quantize to int8 without ceremony. Any length in, same
 length out - the input is padded to a multiple of `2 ** depth` inside `forward` and cropped back.
 
-Alternative if the device needs **causal streaming**: a dilated TCN (Bai, Kolter, Koltun,
-[arXiv:1803.01271](https://arxiv.org/abs/1803.01271)) reaches the same receptive field with
-fewer parameters and runs off a ring buffer. It cannot see past a boundary, so a boundary is
+Alternative if the device needs **causal streaming**: a dilated TCN (Bai, Kolter, Koltun, above)
+reaches the same receptive field with fewer parameters and runs off a ring buffer. It cannot see past a boundary, so a boundary is
 only callable after it has gone by. Not built - the device already analyses in windows.
 
 ### The polarity flip is the augmentation that matters

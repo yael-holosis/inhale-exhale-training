@@ -28,7 +28,9 @@ from torch.utils.data import DataLoader
 
 from clearml_utils import initialize_clearml_task, run_title
 from models.lightning_module import PhaseSegmenter
+from phase import figures
 from phase.building import load_windows, resolve
+from phase.decode import decode
 from phase.dataset import WindowDataset, class_weights
 from phase.labels import PHASES
 from phase.splits import SPLIT_COLUMN, describe, split_for
@@ -49,12 +51,49 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
     return out
 
 
+def test_figure(cfg: DictConfig, model, dataset: Path, test: pd.DataFrame,
+                run_dir: Path) -> Path | None:
+    """Draw a spread of test windows - worst, median, best - beside the metrics."""
+    if not cfg.plot.windows:
+        return None
+    model.eval()
+    items = []
+    for _, row in test.iterrows():
+        with np.load(dataset / str(row["shard"]), allow_pickle=False) as stored:
+            position = int(row["position"])
+            start, end = stored["offsets"][position], stored["offsets"][position + 1]
+            values = stored["values"][start:end].astype(np.float32)
+            reference = stored["targets"][start:end].astype(np.int64)
+        centred = values - values.mean()
+        scale = centred.std()
+        normalised = centred / scale if scale > 1e-8 else centred
+        with torch.no_grad():
+            logits = model(torch.from_numpy(normalised[None, None, :]))
+        prediction = decode(logits[0].permute(1, 0).cpu().numpy(), model.cost,
+                            model.min_duration)
+        items.append({"values": values, "reference": reference, "prediction": prediction,
+                      "fps": float(row["analysis_fps"]), "row": row,
+                      "score": figures.score(prediction, reference)})
+
+    chosen = figures.choose(items, cfg.plot.windows, cfg.plot.pick, cfg.seed)
+    if not chosen:
+        return None
+    panels = [{**item, "title": (f"{item['row']['PatientID']} · window "
+                                 f"{int(item['row']['RespirationWindowID'])} · "
+                                 f"{item['row']['env']} · macro F1 {item['score']:.2f}")}
+              for item in chosen]
+    return figures.plot_windows(
+        panels, run_dir / "test_windows.png",
+        f"fold {cfg.data.split.fold} test set · {cfg.plot.pick} of {len(items)} windows",
+        "the production algorithm" if cfg.data.labels.source == "algorithm" else "a labeller")
+
+
 @hydra.main(version_base=None, config_path="parameter", config_name="config")
 def main(cfg: DictConfig) -> None:
     pl.seed_everything(cfg.seed + cfg.data.split.fold, workers=True)
     run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
 
-    dataset = resolve(cfg.data.root, cfg.data.dir)
+    dataset = resolve(cfg.data.root, cfg.data.dir, cfg.data.labels.source)
     manifest = load_windows(dataset)
     cut = cfg.data.split
     if SPLIT_COLUMN not in manifest.columns:
@@ -114,11 +153,20 @@ def main(cfg: DictConfig) -> None:
     for key, value in sorted(results[0].items()):
         print(f"  {key:34s} {value:.2f}")
 
+    # A page of test windows with every run, not on request: a macro F1 does not say whether the
+    # breaths came out as breaths, and nobody goes back to draw one for a run that looked fine.
+    figure = test_figure(cfg, model, dataset, splits["test"], run_dir)
+    if figure:
+        print(f"test windows: {figure}")
+
     # The checkpoint is the artifact, so it travels with the task rather than sitting in a run
     # directory somebody has to find.
     if task is not None and checkpoint.best_model_path:
         task.upload_artifact("best_checkpoint", artifact_object=checkpoint.best_model_path)
         task.upload_artifact("test_metrics", artifact_object=str(run_dir / "test_metrics.csv"))
+        if figure:
+            task.get_logger().report_image("test windows", cfg.plot.pick, iteration=0,
+                                           local_path=str(figure), max_image_history=1)
 
 
 if __name__ == "__main__":
