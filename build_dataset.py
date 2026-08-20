@@ -10,8 +10,17 @@ Options
 -------
 
 `--env ds_algo | ds_prod`   Which instance. `ds_prod` reads production's patients and raw scans
-    and **writes nothing to production**; `ds_algo` is the data-science cohort, which is where
-    the sleep-lab nights are. Defaults to `data.env`.
+    and **writes nothing to production**; `ds_algo` is the data-science cohort - the `SL` sleep-lab
+    nights. Defaults to `data.env`.
+
+    **The two are separate runs into the same directory.** Their `RadarSignal` ID spaces are
+    unrelated, so a shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from every
+    shard present - a second run extends the set rather than replacing its index. They cannot be
+    one run: the raw scans live in different accounts, and `scan_reader` switches the process's
+    `AWS_PROFILE` to reach them.
+
+        poetry run python build_dataset.py --env ds_prod --patients bs- RM- --per-patient 100
+        poetry run python build_dataset.py --env ds_algo --patients SL   --per-patient 100
 
 `--patients PREFIX [...]`   Patients by prefix, matching either the study name (`SL0066`, `SL`)
     or the patient key (`bs-`, `RM-`). Omit for the config's list; `--patients` with no value
@@ -91,30 +100,41 @@ def main() -> int:
         print("nothing built")
         return 1
 
-    total = max(stats.samples, 1)
+    # Counted off the manifest, so the summary describes the **dataset** - both environments,
+    # every earlier run - rather than only the signals this invocation happened to fetch.
+    per_class = {name: int(manifest[f"n_{name}"].sum()) for name in PHASES}
+    samples = max(sum(per_class.values()), 1)
     summary = {
-        "env": args.env, "patients": patients, "per_patient": args.per_patient,
-        "seed": args.seed,
-        "signals": {"planned": stats.signals_planned, "built": stats.signals_built,
-                    "failed": stats.signals_failed},
-        "windows": {"kept": stats.windows_kept, "no_phases": stats.windows_no_phases,
-                    "rejected_by_production": stats.windows_rejected},
-        "samples": stats.samples,
-        "hours": round(stats.samples / 10.0 / 3600.0, 2),
-        "per_class": stats.per_class,
-        "per_class_fraction": {name: round(count / total, 4)
-                               for name, count in stats.per_class.items()},
+        "run": {"env": args.env, "patients": patients, "per_patient": args.per_patient,
+                "seed": args.seed,
+                "signals": {"planned": stats.signals_planned, "built": stats.signals_built,
+                            "failed": stats.signals_failed},
+                "windows": {"kept": stats.windows_kept, "no_phases": stats.windows_no_phases,
+                            "rejected_by_production": stats.windows_rejected},
+                "failures": stats.failures[:50]},
+        "dataset": {
+            "environments": sorted(manifest["env"].astype(str).unique()),
+            "patients": int(manifest["PatientID"].nunique()),
+            "signals": int(manifest["RadarSignalID"].nunique()),
+            "windows": int(len(manifest)),
+            "samples": samples,
+            "hours": round(samples / 10.0 / 3600.0, 2),
+            "per_class": per_class,
+            "per_class_fraction": {name: round(count / samples, 4)
+                                   for name, count in per_class.items()},
+        },
         "versions": bridge.versions(),
-        "failures": stats.failures[:50],
     }
     with open(out_dir / SUMMARY_NAME, "w") as handle:
         yaml.safe_dump(summary, handle, sort_keys=False)
 
-    print(f"\n{stats.signals_built} signals, {stats.windows_kept} windows, "
-          f"{stats.samples:,} samples ({summary['hours']} h)")
+    print(f"\nthis run: {stats.signals_built} signals, {stats.signals_failed} failed")
+    print(f"dataset:  {manifest['RadarSignalID'].nunique()} signals, {len(manifest)} windows, "
+          f"{samples:,} samples ({summary['dataset']['hours']} h), "
+          f"{manifest['PatientID'].nunique()} patients over "
+          f"{', '.join(summary['dataset']['environments'])}")
     for name in PHASES:
-        print(f"  {name:8s} {stats.per_class[name]:9,d}  "
-              f"{100 * stats.per_class[name] / total:5.1f}%")
+        print(f"  {name:8s} {per_class[name]:9,d}  {100 * per_class[name] / samples:5.1f}%")
     if stats.signals_failed:
         print(f"\n{stats.signals_failed} signals failed - first few:")
         for line in stats.failures[:5]:

@@ -31,7 +31,11 @@ from phase import bridge
 from phase.labels import PHASES, class_counts, spans_to_targets
 
 MANIFEST_NAME = "manifest.csv"
-SHARD_TEMPLATE = "signal_{signal_id}.npz"
+SHARD_TEMPLATE = "{env}_signal_{signal_id}.npz"
+"""Environment first, and it has to be. `ds_algo` and `ds_prod` have unrelated `RadarSignal` ID
+spaces - signal 2120091 is a different recording on each - so one filename would silently
+overwrite the other's samples. The labelling repo prefixes its S3 window keys for the same
+reason."""
 SUMMARY_NAME = "build_summary.yaml"
 
 
@@ -82,7 +86,7 @@ def windows_of_signal(env_key: str, row: pd.Series, labeling_repo: str,
     return out
 
 
-def _shard_arrays(signal_id: int, patient: str, session_id: int,
+def _shard_arrays(env_key: str, signal_id: int, patient: str, session_id: int,
                   windows: list[dict[str, Any]]) -> dict[str, np.ndarray]:
     """One .npz per signal: its windows concatenated, plus the offsets that cut them apart.
 
@@ -111,33 +115,8 @@ def _shard_arrays(signal_id: int, patient: str, session_id: int,
         "signal_id": np.int64(signal_id),
         "patient": np.str_(patient),
         "session_id": np.int64(session_id),
+        "env": np.str_(env_key),
     }
-
-
-def _manifest_rows(signal_id: int, patient: str, session_id: int, env_key: str,
-                   windows: list[dict[str, Any]], shard: str) -> list[dict[str, Any]]:
-    rows = []
-    for position, window in enumerate(windows):
-        counts = class_counts(window["target"])
-        rows.append({
-            "env": env_key,
-            "shard": shard,
-            "position": position,
-            "RadarSignalID": signal_id,
-            "SessionID": session_id,
-            "PatientID": patient,
-            "WindowIndex": window["window_index"],
-            "start_index": window["start_index"],
-            "samples": int(window["values"].size),
-            "analysis_fps": window["analysis_fps"],
-            "respiration_rate": window["respiration_rate"],
-            "range_bin": window["range_bin"],
-            "rejected": window["rejected"],
-            "orientation": window.get("orientation", ""),
-            "n_spans": len(window["spans"]),
-            **{f"n_{name}": counts[name] for name in PHASES},
-        })
-    return rows
 
 
 def build(env_key: str, patients: list[str] | None, per_patient: int, seed: int,
@@ -161,15 +140,11 @@ def build(env_key: str, patients: list[str] | None, per_patient: int, seed: int,
         stats.signals_planned = len(chosen)
 
     log(f"{stats.signals_planned} signals over {chosen['PatientID'].nunique()} patients")
-    rows: list[dict[str, Any]] = []
     started = time.time()
     for count, (_, row) in enumerate(chosen.iterrows(), start=1):
         signal_id = int(row["SignalID"])
-        shard = SHARD_TEMPLATE.format(signal_id=signal_id)
-        path = out_dir / shard
-        if path.exists():
-            with np.load(path, allow_pickle=False) as stored:
-                rows.extend(_manifest_from_shard(stored, env_key, shard))
+        shard = SHARD_TEMPLATE.format(env=env_key, signal_id=signal_id)
+        if (out_dir / shard).exists():
             stats.signals_built += 1
             continue
         try:
@@ -186,10 +161,9 @@ def build(env_key: str, patients: list[str] | None, per_patient: int, seed: int,
             stats.failures.append(f"{signal_id}: no windows reached the phase calculation")
             continue
 
-        np.savez_compressed(path, **_shard_arrays(signal_id, str(row["PatientID"]),
-                                                  int(row["SessionID"]), usable))
-        rows.extend(_manifest_rows(signal_id, str(row["PatientID"]), int(row["SessionID"]),
-                                   env_key, usable, shard))
+        np.savez_compressed(out_dir / shard,
+                            **_shard_arrays(env_key, signal_id, str(row["PatientID"]),
+                                            int(row["SessionID"]), usable))
         stats.signals_built += 1
         stats.windows_kept += len(usable)
         stats.windows_no_phases += sum(1 for w in usable if not w["spans"])
@@ -204,14 +178,26 @@ def build(env_key: str, patients: list[str] | None, per_patient: int, seed: int,
             log(f"  [{count}/{stats.signals_planned}] {stats.windows_kept} windows, "
                 f"{rate:.1f}s/signal, ~{left/60:.0f} min left")
 
-    manifest = pd.DataFrame(rows)
+    # Rebuilt from every shard in the directory, not from this run's plan. A second run - the
+    # other environment, or more patients - must extend the set rather than replace its index
+    # with only what it happened to touch.
+    manifest = rebuild_manifest(out_dir)
     if not manifest.empty:
         manifest.to_csv(out_dir / MANIFEST_NAME, index=False)
     return manifest, stats
 
 
-def _manifest_from_shard(stored, env_key: str, shard: str) -> list[dict[str, Any]]:
-    """Rebuild a shard's manifest rows without re-running anything, for a resumed build."""
+def rebuild_manifest(out_dir: Path) -> pd.DataFrame:
+    """The index, read back off the shards. Cheap - only the small arrays are touched."""
+    rows: list[dict[str, Any]] = []
+    for path in sorted(Path(out_dir).glob("*_signal_*.npz")):
+        with np.load(path, allow_pickle=False) as stored:
+            rows.extend(_manifest_from_shard(stored, path.name))
+    return pd.DataFrame(rows)
+
+
+def _manifest_from_shard(stored, shard: str) -> list[dict[str, Any]]:
+    """A shard's manifest rows, without re-running anything."""
     offsets = stored["offsets"]
     targets = stored["targets"]
     rows = []
@@ -220,7 +206,7 @@ def _manifest_from_shard(stored, env_key: str, shard: str) -> list[dict[str, Any
         counts = class_counts(window_target.astype(np.int64))
         rate = float(stored["respiration_rate"][position])
         rows.append({
-            "env": env_key, "shard": shard, "position": position,
+            "env": str(stored["env"]), "shard": shard, "position": position,
             "RadarSignalID": int(stored["signal_id"]),
             "SessionID": int(stored["session_id"]),
             "PatientID": str(stored["patient"]),

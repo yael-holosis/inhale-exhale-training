@@ -82,3 +82,18 @@ def test_more_folds_than_patients_is_refused(built):
     manifest, _ = built
     with pytest.raises(ValueError):
         patient_folds(manifest, n_folds=99)
+
+
+def test_the_manifest_is_rebuilt_from_every_shard_present(tmp_path):
+    """A second run - the other environment, or more patients - extends the set.
+
+    Rebuilt from the directory rather than from the run's plan, so an index written by the
+    `ds_algo` run still names the `ds_prod` shards beside it.
+    """
+    from phase.building import rebuild_manifest
+
+    synthetic.build(tmp_path, n_patients=2, signals_per_patient=1, windows_per_signal=2)
+    rebuilt = rebuild_manifest(tmp_path)
+    assert len(rebuilt) == 4
+    assert set(rebuilt["env"]) == {synthetic.ENV}
+    assert rebuilt["shard"].str.startswith(synthetic.ENV).all()

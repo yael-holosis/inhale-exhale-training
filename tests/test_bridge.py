@@ -48,3 +48,17 @@ def test_the_bridge_reaches_their_modules_not_ours():
 
 def test_versions_names_what_decides_the_numerics():
     assert set(bridge.versions()) == {"holosissystem", "holosis-aws-manager"}
+
+
+def test_a_shard_name_carries_its_environment():
+    """`ds_algo` and `ds_prod` have unrelated RadarSignal ID spaces.
+
+    Signal 2120091 is a different recording on each, so a name without the environment in it
+    would have one run silently overwrite the other's samples.
+    """
+    from phase.building import SHARD_TEMPLATE
+
+    algo = SHARD_TEMPLATE.format(env="ds_algo", signal_id=2120091)
+    prod = SHARD_TEMPLATE.format(env="ds_prod", signal_id=2120091)
+    assert algo != prod
+    assert "ds_algo" in algo and "ds_prod" in prod

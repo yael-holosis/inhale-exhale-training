@@ -49,18 +49,52 @@ Three things have to be reachable, and each is reported by name if it is not:
 | `inhale-exhale-detection` checkout | `repos.detection` | `INHALE_EXHALE_DETECTION_REPO` |
 | ClearML credentials | `~/clearml.conf` | `DISABLE_CLEARML=true` to run without |
 
-Dataset building also needs an SSO session for the data-science account, and production's raw
-scans need the production profile - both go through the labelling repo's own connection code.
+### Credentials and profiles
+
+**This repo defines none of them.** There is no `aws:` block in `parameter/`, no secret name and
+no profile - every connection is opened by `respiration-phase-labeling/utils/db.py` and
+`building.scan_reader`, from that repo's `parameters/parameters.yaml`. It is stated here only so
+nobody goes looking for a second copy.
+
+| | `ds_algo` (SL, sleep lab) | `ds_prod` (bs- / RM- pilots) |
+| --- | --- | --- |
+| Signals + patients | data-science MySQL, Secrets Manager `sm-data-science-01-db-password-mysql-6g2w8dxe`, db `edge_data` | **production's** MySQL, user `edge_data_user_ro`, db `edge_data` |
+| Human labels | same server, db `edge_data_extras` | data-science replica, Secrets Manager `sm-data-science-01-db-password-edge-data-endpoint-0owgu5br` |
+| Raw scans | profile `holosis-datascience-algo`, bucket `s3-data-science-01-holosis-health-system-sessions` | profile `holosis-prod-admin`, bucket `s3-prod-01-holosis-health-system-sessions` |
+
+Two things follow from that table:
+
+- **The scan buckets are in different accounts**, and the data-science profile gets a 403 on
+  production's. `scan_reader` switches the process's `AWS_PROFILE` to reach them, which is why
+  the two cohorts are two runs and not one.
+- **Production is read-only by the server's rules**, not only by ours: `edge_data_user_ro` is
+  granted SELECT and nothing else. Nothing in this repo writes anywhere near it.
+
+Production's read-only database password is carried **in plaintext** in the labelling repo's
+tracked `parameters/parameters.yaml`, and therefore in its git history. That is a deliberate
+choice made there and documented there - most labellers have no Secrets Manager access in the
+production account, and the app was unusable for them without it - but it is now a dependency of
+this repo too, so it is named rather than left to be discovered. `RESPIRATION_PHASE_LABELING_PROD_RO_PASSWORD`
+or `secrets/prod_edge_ro_password.txt` override it if it is ever moved out.
 
 ```bash
 aws sso login --profile holosis-datascience-algo
+aws sso login --profile holosis-prod-admin        # ds_prod only
 ```
 
 ## Building the dataset
 
 ```bash
 poetry run python build_dataset.py --env ds_prod --patients bs- RM- --per-patient 100
+poetry run python build_dataset.py --env ds_algo --patients SL   --per-patient 100
 ```
+
+**Two cohorts, two runs, one directory.** `ds_prod` is the pilots (`bs-`, `RM-`); `ds_algo` is
+the data-science instance, where the `SL` sleep-lab nights are. They cannot be one run - the raw
+scans live in different accounts and `scan_reader` switches the process's profile to reach them
+- so a shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from every shard
+present. Their `RadarSignal` ID spaces are unrelated (signal 2120091 is a different recording on
+each), which is what the prefix is for.
 
 Samples signals per patient - seeded, and spread across sessions so a patient with a thousand
 sessions does not contribute a thousand near-identical minutes of one night - runs the
@@ -191,7 +225,7 @@ config `parameters`, and both checkouts sit on `sys.path` during a build - so th
 `phase/` and `parameter/`. Rename either back and every `from utils import ...` inside that repo
 silently resolves to one of ours. `tests/test_bridge.py` fails if it happens.
 - `models/` - `unet1d`, `lightning_module`.
-- `tests/` - 44 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
+- `tests/` - 46 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
   for a smoke run:
 
 ```bash
@@ -202,8 +236,13 @@ DISABLE_CLEARML=true poetry run python train.py \
 
 ## Open
 
-- **The dataset has not been built yet.** Everything above runs end to end on the synthetic set;
-  the first real build is the next step, and its class balance is the first thing to look at.
+- **The dataset has not been built at scale yet.** Verification runs of 2-3 signals per cohort
+  work end to end against both `ds_prod` and `ds_algo`; the first full build is the next step.
+  Early class balance on 22 windows: unknown 33%, exhale 26%, inhale 25%, stop 16% - far more
+  even than the human set's 64% unknown, because production labels every breath it detects.
+- **The build needs disk.** Each signal downloads a 7-28 MB raw scan, discarded after its windows
+  are extracted. A machine with no headroom fails per signal with `[Errno 28] No space left on
+  device`, reports it, and carries on - so a starved run finishes looking successful and short.
 - Whether breath shape alone settles direction under the polarity flip. If it does not, the
   phase anchor becomes a second input channel.
 - Whether the human set is large enough for a fine-tune rather than only an evaluation.

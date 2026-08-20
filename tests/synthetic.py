@@ -16,6 +16,10 @@ from phase.labels import EXHALE, INHALE, STOP, UNKNOWN, class_counts
 from phase.building import MANIFEST_NAME, SHARD_TEMPLATE
 from phase.labels import PHASES
 
+ENV = "synthetic"
+"""Stands where `ds_algo` / `ds_prod` would be. The shard name carries it because the two real
+environments have unrelated RadarSignal ID spaces."""
+
 
 def breath(rate_bpm: float, fps: float, rise_fraction: float,
            rng) -> tuple[np.ndarray, np.ndarray]:
@@ -72,7 +76,7 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
                 targets.append(t)
             lengths = np.array([v.size for v in values], dtype=np.int64)
             offsets = np.concatenate(([0], np.cumsum(lengths)))
-            shard = SHARD_TEMPLATE.format(signal_id=signal_id)
+            shard = SHARD_TEMPLATE.format(env=ENV, signal_id=signal_id)
             np.savez_compressed(
                 root / shard,
                 values=np.concatenate(values).astype(np.float32),
@@ -86,10 +90,10 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
                 rejected=np.zeros(windows_per_signal, dtype=bool),
                 orientation=np.array(["kept"] * windows_per_signal),
                 signal_id=np.int64(signal_id), patient=np.str_(name),
-                session_id=np.int64(patient))
+                session_id=np.int64(patient), env=np.str_(ENV))
             for position in range(windows_per_signal):
                 counts = class_counts(targets[position])
-                rows.append({"env": "synthetic", "shard": shard, "position": position,
+                rows.append({"env": ENV, "shard": shard, "position": position,
                              "RadarSignalID": signal_id, "SessionID": patient,
                              "PatientID": name, "WindowIndex": position,
                              "start_index": position * 50, "samples": samples,
