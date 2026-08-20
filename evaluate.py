@@ -163,9 +163,20 @@ def on_fold(args, cfg) -> int:
               f"for human labels.")
 
     if args.plot:
-        path = draw(items, Path(cfg.out_dir) / "test_windows",
-                    f"{Path(args.checkpoint).stem}_fold{args.fold}_{args.plot_pick}.png",
-                    f"fold {args.fold} test set · {args.plot_pick} of {len(items)} windows",
+        pool = items
+        if args.plot_filter == "labelled":
+            pool = [item for item, keep in zip(items, labelled) if keep]
+        elif args.plot_filter == "unlabelled":
+            pool = [item for item, keep in zip(items, labelled) if not keep]
+        if not pool:
+            print(f"\nno {args.plot_filter} windows to draw")
+            return 0
+        suffix = "" if args.plot_filter == "all" else f"_{args.plot_filter}"
+        path = draw(pool, Path(cfg.out_dir) / "test_windows",
+                    f"{Path(args.checkpoint).stem}_fold{args.fold}_{args.plot_pick}{suffix}.png",
+                    f"fold {args.fold} test set · {args.plot_pick} of {len(pool)} "
+                    + {"all": "windows", "labelled": "windows the algorithm labelled",
+                       "unlabelled": "windows the algorithm left entirely unknown"}[args.plot_filter],
                     args.plot_pick, args.plot, cfg.seed, "algorithm",
                     OmegaConf.to_container(cfg.plot, resolve=True))
         print(f"\n{path}")
@@ -233,6 +244,10 @@ def main() -> int:
                         help="draw N test windows to out/test_windows/")
     parser.add_argument("--plot-pick", choices=list(figures.PICKS), default=figures.SPREAD,
                         help="which N: spread (worst..best), worst, best, or random")
+    parser.add_argument("--plot-filter", choices=("all", "labelled", "unlabelled"),
+                        default="all",
+                        help="which windows to draw from: those the reference labelled, those "
+                             "it left entirely unknown, or all of them")
     args = parser.parse_args()
 
     root = OmegaConf.load(CONFIG_DIR / "config.yaml")
