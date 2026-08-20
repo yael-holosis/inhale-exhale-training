@@ -84,52 +84,115 @@ Credentials come from Secrets Manager through `holosis_aws_manager`; a test fail
 aws sso login --profile holosis-datascience-algo
 ```
 
-## Building the dataset
+## Building a dataset
 
 ```bash
-poetry run python build_dataset.py --catalogue --env ds_algo   # what is uploaded, no writes
-poetry run python build_dataset.py --env ds_algo               # the SL sleep-lab nights
-poetry run python build_dataset.py --env ds_prod               # the pilots
+poetry run python build_dataset.py --catalogue --env ds_algo   # what is there, no writes
+poetry run python build_dataset.py --env ds_algo               # a new dataset
+poetry run python build_dataset.py --env ds_prod --into latest # the other cohort beside it
+poetry run python make_splits.py --dataset latest              # assign the splits
 ```
 
-**No raw scan is read.** The pipeline already ran when these windows were uploaded; this reads
-each window's samples from S3 (`phase/sources.py`) and asks production's own
-`calculate_inhale_exhale_time` what it calls on them (`phase/production.py`, straight onto
-`holosissystem`). Two reads and a function call - about 1.7 s per signal, and no disk pressure.
+Each build writes a **new timestamped directory**, self-describing on disk:
 
-That also means the training windows are **the same objects a labeller sees**, byte for byte.
-`RespirationWindowID` goes into the manifest, so a human label written later joins straight onto
-the row the network trained on, with no re-derivation and no risk of the two describing different
-samples.
+```
+data_sets/phases_algorithm_20260820T143456Z/
+  build_params.yaml            every parameter that decided it, plus versions; one entry per run
+  windows.csv                  one row per window: provenance, class counts, split columns
+  stats.yaml                   hours, class balance, per-patient / per-cohort / per-split counts
+  ds_algo_signal_1557424.npz   samples and per-sample targets, one file per signal
+```
 
-**To grow the pool, more windows have to be uploaded to `RespirationWindow`.** That is a write,
-and this repo has no writer - by design.
+Six months from now the only question that matters about a checkpoint is what it was trained on,
+and the answer has to be readable off disk rather than reconstructed from a config that has moved
+on. `data.dir: latest` resolves to the newest build; name a directory to pin a run to one dataset.
+
+**No raw scan is downloaded.** The pipeline already ran when these windows were uploaded; this
+reads each window's samples from S3 (`phase/sources.py`) and labels them. About 1.7 s per signal,
+all of it S3 and the database, so there is no disk pressure at all.
 
 **Two cohorts, two runs, one directory.** `ds_algo` is the data-science instance with the `SL`
 sleep-lab nights; `ds_prod` is the pilots. Their `RadarSignal` ID spaces are unrelated - signal
-2120091 is a different recording on each - so a shard is named `<env>_signal_<id>.npz` and the
-manifest is rebuilt from every shard present.
+2120091 is a different recording on each - so a shard is named `<env>_signal_<id>.npz` and
+`windows.csv` is rebuilt from every shard present, carrying any split already assigned.
 
 **Resumable**, and it costs nothing to be: a window blob is immutable once uploaded, so a shard
 already on disk can never be stale.
 
+### Where the labels come from
+
+`data.labels.source`, and it is the choice the whole repo turns on:
+
+| | `algorithm` | `human` |
+| --- | --- | --- |
+| What | production's own `calculate_inhale_exhale_time`, re-run on the stored window | `BreathPhaseTimeRecord` - the spans a person drew |
+| How much | every window (2,848 today) | a few dozen |
+| What it measures | imitation of the current algorithm | correctness |
+
+`algorithm` is what there is enough of to train on, and it is **distillation**: the ceiling is the
+current algorithm, its boundaries are the 10% and 90% amplitude crossings rather than phase
+durations, and it emits no phase for the turn from inhale to exhale - so `unknown` sits
+structurally at the crest of most breaths. `human` is the real target and is what the set becomes
+once enough windows carry a label.
+
+A directory holds **one** source. `--into` refuses to mix them: two different targets in one
+directory would train a model against a moving definition. Override per run with
+`--labels human`. Under `human`, windows nobody has labelled are not in the dataset at all -
+"nobody looked at this" and "somebody looked and could not call it" are different facts, and the
+labelling rule already writes the second one down as `unknown`.
+
+## Splits
+
+`make_splits.py` writes them into the dataset's own `windows.csv`, so the record of which window
+went where survives the run that used it. Separate from the build, because re-splitting - a new
+seed, different stratification, more folds - should not mean re-downloading a dataset.
+
+```
+split         train | test          held out once, by patient, never trained on in any fold
+fold_0_split  train | val | test    test stays test; folds rotate only the validation set
+fold_1_split  ...
+```
+
+**Test is fixed across folds**, so every fold reports against the same patients and one headline
+number means something. `train.py` reads these columns and never recomputes them - the split that
+trained a model has to be the one recorded beside the data.
+
+Everything about how is in `data.split`:
+
+| Key | What it does |
+| --- | --- |
+| `test_fraction` | share of windows held out, 0.2 |
+| `folds`, `fold`, `seed` | how many validation folds, which one to train, and the seed |
+| `group_columns` | the unit a split may not cut through - `[env, PatientID]` |
+| `stratify_cols` | what is balanced across test and across folds - `[env]`; empty disables it |
+
+**Grouped by patient, always.** Windows stride 5 s across a 20 s span, so neighbours share most of
+their breaths: a random split puts the same breath on both sides and reports nothing. A split by
+signal is not enough either - one patient's night is one breathing pattern.
+
+The group key includes `env` because `PatientID` is a *display* name and the two instances have
+unrelated identity spaces. Nothing stops a name appearing on both, and if one did, the name alone
+would merge two different people into one group.
+
+Stratification is a **greedy deficit-first assignment**, not `StratifiedGroupKFold`. Both were
+measured: that splitter balances the number of *groups* per stratum, and our groups differ in size
+by more than an order of magnitude (SL0066 has 190 windows, bs-010 has 81), so it produced folds
+ranging from 0% to 58% `ds_prod` against an overall 32%, with sizes from 11.9% to 24.0%. Balancing
+windows is what the metrics are averaged over.
+
 ## Training
 
 ```bash
-poetry run python train.py                                  # fold 0
-poetry run python train.py data.fold=3 training.max_epochs=100
-DISABLE_CLEARML=true poetry run python train.py             # local only
+poetry run python train.py                                       # fold 0 of the latest dataset
+poetry run python train.py data.split.fold=3 training.max_epochs=100
+poetry run python train.py data.dir=phases_algorithm_20260820T143456Z
+DISABLE_CLEARML=true poetry run python train.py                  # local only
 ```
 
 Hydra owns the config (`parameter/`), Lightning the loop, ClearML the record - project
 **`inhale-exhale-phase`**, credentials from `~/clearml.conf`, scalars through the TensorBoard
 logger, config through `connect_configuration`, and the best checkpoint uploaded as an artifact.
 A server that does not answer downgrades the run to local logging rather than killing it.
-
-**Splits are grouped by patient.** Windows stride 5 s across a 20 s span, so neighbours share
-most of their breaths - a random split over windows puts the same breath on both sides and
-reports a number that means nothing. A split by signal is not enough either: one patient's night
-is one breathing pattern.
 
 ## The model
 
@@ -217,10 +280,12 @@ The repo root holds only things you can run.
 - `train.py` - one fold, Hydra + Lightning + ClearML.
 - `evaluate.py` - a checkpoint against the algorithm's labels, or against human ones.
 - `clearml_utils.py` - the same wiring as `cough`; no credentials in the repo.
+- `build_dataset.py` - read the windows, label them, write a dataset directory.
+- `make_splits.py` - assign `split` and `fold_i_split` into that directory's `windows.csv`.
 - `parameter/` - the Hydra config tree, plus `sources/default.yaml` (databases, bucket, tables).
 - `phase/` - `sources` (the two databases and S3), `production` (production's phase call and the
-  pairing of its boundary arrays), `labels` (the vocabulary), `building` (the dataset), `dataset`,
-  `splits`, `decode`, `metrics`.
+  pairing of its boundary arrays), `labelsources` (algorithm or human), `labels` (the vocabulary),
+  `building` (the dataset directory), `dataset`, `splits`, `decode`, `metrics`.
 
 `phase/production.py` is the file to watch. It is a faithful port of the phase call and span
 pairing that `inhale-exhale-detection` validated, running against `holosissystem` directly - and

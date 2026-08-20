@@ -28,13 +28,14 @@ from torch.utils.data import DataLoader
 
 from clearml_utils import initialize_clearml_task, run_title
 from models.lightning_module import PhaseSegmenter
+from phase.building import load_windows, resolve
 from phase.dataset import WindowDataset, class_weights
 from phase.labels import PHASES
-from phase.splits import describe, patient_folds, split_for
+from phase.splits import SPLIT_COLUMN, describe, split_for
 
 
-def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame]) -> dict[str, DataLoader]:
-    root = Path(cfg.data.dir)
+def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
+            root: Path) -> dict[str, DataLoader]:
     out = {}
     for name, frame in splits.items():
         train = name == "train"
@@ -50,17 +51,21 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame]) -> dict[str, DataL
 
 @hydra.main(version_base=None, config_path="parameter", config_name="config")
 def main(cfg: DictConfig) -> None:
-    pl.seed_everything(cfg.seed + cfg.data.fold, workers=True)
+    pl.seed_everything(cfg.seed + cfg.data.split.fold, workers=True)
     run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
 
-    manifest_path = Path(cfg.data.dir) / "manifest.csv"
-    if not manifest_path.exists():
-        raise FileNotFoundError(f"no dataset at {manifest_path} - run build_dataset.py first")
-    manifest = pd.read_csv(manifest_path)
+    dataset = resolve(cfg.data.root, cfg.data.dir)
+    manifest = load_windows(dataset)
+    cut = cfg.data.split
+    if SPLIT_COLUMN not in manifest.columns:
+        raise KeyError(f"{dataset} carries no splits - run: "
+                       f"poetry run python make_splits.py --dataset {dataset}")
 
-    manifest = patient_folds(manifest, cfg.data.folds, seed=cfg.seed)
-    splits = split_for(manifest, cfg.data.fold, cfg.data.val_fraction, seed=cfg.seed)
-    print(f"fold {cfg.data.fold} of {cfg.data.folds}\n{describe(splits)}")
+    # Read off the columns, never recomputed here: the split that trained a model has to be the
+    # one recorded beside the data, not whatever the config happens to say at run time.
+    splits = split_for(manifest, cut.fold)
+    print(f"dataset {dataset}\nfold {cut.fold} of {cut.folds}, test held out of every fold\n"
+          + describe(splits, total=len(manifest), stratify_cols=cut.stratify_cols))
 
     weights = class_weights(splits["train"], PHASES, power=cfg.training.class_weight_power,
                             cap=cfg.training.class_weight_cap)
@@ -81,7 +86,7 @@ def main(cfg: DictConfig) -> None:
                                        task_name=run_title(cfg), timeout=cfg.clearml.timeout_s,
                                        cfg=cfg)
 
-    data = loaders(cfg, splits)
+    data = loaders(cfg, splits, dataset)
     checkpoint = ModelCheckpoint(dirpath=run_dir / "checkpoints", monitor=cfg.training.monitor,
                                  mode=cfg.training.monitor_mode, save_top_k=1,
                                  filename="best-{epoch:02d}")
@@ -102,7 +107,10 @@ def main(cfg: DictConfig) -> None:
 
     report = pd.DataFrame(results)
     report.to_csv(run_dir / "test_metrics.csv", index=False)
-    print("\ntest, fold %d" % cfg.data.fold)
+    # The dataset that produced these numbers, named beside them - a run directory that only says
+    # "fold 0" cannot be traced back to what it was fold 0 of.
+    (run_dir / "dataset.txt").write_text(f"{dataset}\n")
+    print("\ntest, fold %d" % cut.fold)
     for key, value in sorted(results[0].items()):
         print(f"  {key:34s} {value:.2f}")
 

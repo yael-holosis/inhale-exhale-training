@@ -1,40 +1,48 @@
-"""Build the training set from the windows already uploaded to `RespirationWindow`.
+"""Build a dataset directory from the windows already in `RespirationWindow`.
 
-    poetry run python build_dataset.py --env ds_algo --patients SL
-    poetry run python build_dataset.py --env ds_prod
+    poetry run python build_dataset.py --catalogue --env ds_algo      # what is there, no writes
+    poetry run python build_dataset.py --env ds_algo                  # a new dataset
+    poetry run python build_dataset.py --env ds_prod --into data_sets/phases_algorithm_...
 
-Reads each window's samples from S3 and asks production's own inhale/exhale calculation what it
-calls on them. **No raw scan is downloaded** - the app repo already ran the pipeline when it
-uploaded these windows, and this reads what it stored. One `.npz` per signal plus a manifest row
-per window, and every row carries `RespirationWindowID` so a human label written later joins
-straight onto the window the network trained on.
+Each build writes a **new timestamped directory**, self-describing on disk:
+
+    data_sets/phases_algorithm_20260820T165400Z/
+      build_params.yaml            every parameter that decided it, and the versions
+      windows.csv                  one row per window: provenance and class counts
+      stats.yaml                   hours, class balance, per-patient and per-cohort counts
+      ds_algo_signal_1557424.npz   samples and per-sample targets, one file per signal
+
+Then assign the splits, which is a separate step so a re-split needs no rebuild:
+
+    poetry run python make_splits.py --dataset latest
+
+Labels come from `data.labels.source` - `algorithm` (production's own phase calculation, every
+window) or `human` (`BreathPhaseTimeRecord`, a few dozen windows). A directory holds one source;
+`--into` refuses to mix them.
+
+**No raw scan is downloaded.** About 1.7 s per signal, all of it S3 and the database.
 
 Options
 -------
 
 `--env ds_algo | ds_prod`   Which instance. `ds_algo` is the data-science cohort - the `SL`
-    sleep-lab nights; `ds_prod` is the pilots (`bs-`, `RM-`). Defaults to `data.env`.
+    sleep-lab nights; `ds_prod` is the pilots. Production is only ever read.
 
-    **The two are separate runs into the same directory.** Their `RadarSignal` ID spaces are
-    unrelated, so a shard is named `<env>_signal_<id>.npz` and the manifest is rebuilt from
-    every shard present.
+`--into DIR`   Add to an existing dataset instead of starting one. `latest` resolves to the
+    newest. Use it to put the second cohort beside the first.
 
-`--patients PREFIX [...]`   Match the display name (`SL0066`, `SL`) or the patient key
-    (`algo-p089`, `bs-`). Omit for every patient with uploaded windows.
+`--patients PREFIX [...]`   Match the display name (`SL0066`, `SL`) or the patient key (`bs-`).
 
 `--signals ID [...]`   Exactly these radar signals, no sampling.
 
-`--per-patient N`   Cap the **signals** one patient contributes, sampled seeded and spread
-    across sessions. Omit to take everything uploaded.
+`--per-patient N`   Cap the signals one patient contributes, sampled seeded and spread across
+    sessions. Omit to take everything uploaded.
 
-`--unlabelled-only`   Hold back signals a person has already labelled, so they stay a clean test
-    set. Off by default: the human spans are read against these windows either way, and holding
-    them out of training costs data while there are only a handful of them.
+`--labels algorithm | human`   Override `data.labels.source` for this run.
 
 `--limit N`   Stop after N signals. For a first look.
 
-The pool is whatever is in `RespirationWindow`. Growing it means uploading more windows, which
-is a write - and **this repo has no writer**, by design. Reads only, both instances.
+`--catalogue`   Report what is uploaded on an instance and write nothing.
 """
 
 from __future__ import annotations
@@ -43,12 +51,14 @@ import argparse
 import sys
 from pathlib import Path
 
-import yaml
 from omegaconf import OmegaConf
 
-from phase import production, sources
-from phase.building import SUMMARY_NAME, build, catalogue
+from phase import sources
+from phase.building import (PARAMS_NAME, STATS_NAME, WINDOWS_NAME, build, catalogue,
+                            dataset_dir, existing_params, resolve, stamp, summarise,
+                            write_provenance)
 from phase.labels import PHASES
+from phase.labelsources import SOURCES, LabelSource
 
 CONFIG_DIR = Path(__file__).parent / "parameter"
 
@@ -64,15 +74,16 @@ def parse_args(cfg):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--env", default=cfg.data.env)
+    parser.add_argument("--into", default=None,
+                        help="extend this dataset directory instead of starting a new one")
+    parser.add_argument("--labels", choices=list(SOURCES), default=None,
+                        help=f"override data.labels.source (default {cfg.data.labels.source})")
     parser.add_argument("--patients", nargs="*", default=None, metavar="PREFIX")
     parser.add_argument("--signals", nargs="*", type=int, default=None, metavar="ID")
     parser.add_argument("--per-patient", type=int, default=cfg.data.signals_per_patient)
-    parser.add_argument("--unlabelled-only", action="store_true")
     parser.add_argument("--seed", type=int, default=cfg.data.sample_seed)
     parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--out", default=None)
-    parser.add_argument("--catalogue", action="store_true",
-                        help="report what is uploaded on this instance and write nothing")
+    parser.add_argument("--catalogue", action="store_true")
     return parser.parse_args()
 
 
@@ -85,12 +96,25 @@ def show_catalogue(env_key: str) -> int:
     print(f"{env_key}: {len(frame):,} windows, {frame['RadarSignalID'].nunique()} signals, "
           f"{frame['Patient'].nunique()} patients")
     print(f"  {len(labelled)} windows carry human spans "
-          f"({labelled['RadarSignalID'].nunique()} signals)")
+          f"({labelled['RadarSignalID'].nunique()} signals) - the whole `--labels human` pool")
     per = frame.groupby("Patient").agg(windows=("ID", "size"),
                                        signals=("RadarSignalID", "nunique"),
-                                       labelled=("Spans", lambda s: int((s > 0).sum())))
+                                       human=("Spans", lambda s: int((s > 0).sum())))
     print(per.sort_values("windows", ascending=False).to_string())
     return 0
+
+
+def target_directory(args, cfg, source: str) -> Path:
+    """A new timestamped directory, or an existing one that was built the same way."""
+    if not args.into:
+        return dataset_dir(cfg.data.root, cfg.data.name, source)
+    directory = resolve(cfg.data.root, args.into)
+    previous = existing_params(directory).get("labels", {}).get("source")
+    if previous and previous != source:
+        raise SystemExit(
+            f"{directory} was built with labels.source={previous!r} and this run is {source!r}. "
+            f"They are different targets; build a new dataset rather than mixing them.")
+    return directory
 
 
 def main() -> int:
@@ -103,60 +127,47 @@ def main() -> int:
     if args.catalogue:
         return show_catalogue(args.env)
 
-    patients = args.patients if args.patients is not None else list(cfg.data.patients or [])
-    out_dir = Path(args.out or cfg.data.dir)
-    print(f"env {args.env} | patients {patients or 'all'} "
-          f"| per-patient {args.per_patient or 'all'} -> {out_dir}")
+    label_cfg = OmegaConf.to_container(cfg.data.labels, resolve=True)
+    if args.labels:
+        label_cfg["source"] = args.labels
+    labels = LabelSource(args.env, label_cfg)
 
-    manifest, stats = build(env_key=args.env, out_dir=out_dir,
-                            patients=patients or None, signals=args.signals,
-                            per_patient=args.per_patient,
-                            unlabelled_only=args.unlabelled_only, seed=args.seed,
-                            requires_rate=bool(cfg.data.requires_rate), limit=args.limit)
-    if manifest.empty:
+    out_dir = target_directory(args, cfg, labels.source)
+    patients = args.patients if args.patients is not None else list(cfg.data.patients or [])
+    started = stamp()
+    print(f"env {args.env} | labels {labels.source} | patients {patients or 'all'} "
+          f"| per-patient {args.per_patient or 'all'}\n-> {out_dir}")
+
+    frame, stats = build(env_key=args.env, out_dir=out_dir, labels=labels,
+                         patients=patients or None, signals=args.signals,
+                         per_patient=args.per_patient, seed=args.seed, limit=args.limit)
+    if frame.empty:
         print("nothing built")
         return 1
 
-    per_class = {name: int(manifest[f"n_{name}"].sum()) for name in PHASES}
-    samples = max(sum(per_class.values()), 1)
-    summary = {
-        "run": {"env": args.env, "patients": patients, "per_patient": args.per_patient,
-                "seed": args.seed, "unlabelled_only": args.unlabelled_only,
-                "signals": {"planned": stats.signals_planned, "built": stats.signals_built,
-                            "failed": stats.signals_failed},
-                "windows": {"kept": stats.windows_kept,
-                            "no_phases": stats.windows_no_phases},
-                "failures": stats.failures[:50]},
-        "dataset": {
-            "environments": sorted(manifest["env"].astype(str).unique()),
-            "patients": int(manifest["PatientID"].nunique()),
-            "signals": int(manifest["RadarSignalID"].nunique()),
-            "windows": int(len(manifest)),
-            "windows_without_phases": int((manifest["n_spans"] == 0).sum()),
-            "samples": samples,
-            "hours": round(samples / 10.0 / 3600.0, 2),
-            "per_class": per_class,
-            "per_class_fraction": {name: round(count / samples, 4)
-                                   for name, count in per_class.items()},
-        },
-        "holosissystem": production.version(),
-    }
-    with open(out_dir / SUMMARY_NAME, "w") as handle:
-        yaml.safe_dump(summary, handle, sort_keys=False)
+    write_provenance(out_dir, {
+        "started": started, "finished": stamp(), "env": args.env, "patients": patients,
+        "per_patient": args.per_patient, "signals": args.signals, "sample_seed": args.seed,
+        "limit": args.limit, "labels": labels.describe(),
+        "signals_planned": stats.signals_planned, "signals_built": stats.signals_built,
+        "signals_failed": stats.signals_failed, "failures": stats.failures[:50],
+    }, frame)
 
-    data = summary["dataset"]
+    facts = summarise(frame)
     print(f"\nthis run: {stats.signals_built} signals, {stats.signals_failed} failed")
-    print(f"dataset:  {data['signals']} signals, {data['windows']} windows "
-          f"({data['windows_without_phases']} with no phases), {samples:,} samples "
-          f"({data['hours']} h), {data['patients']} patients over "
-          f"{', '.join(data['environments'])}")
+    print(f"dataset:  {facts['signals']} signals, {facts['windows']} windows "
+          f"({facts['windows_unlabelled']} carry no label), {facts['samples']:,} samples "
+          f"({facts['hours']} h), {facts['patients']} patients over "
+          f"{', '.join(facts['environments'])}")
     for name in PHASES:
-        print(f"  {name:8s} {per_class[name]:9,d}  {100 * per_class[name] / samples:5.1f}%")
+        share = 100 * facts["per_class"][name] / facts["samples"]
+        print(f"  {name:8s} {facts['per_class'][name]:9,d}  {share:5.1f}%")
     if stats.signals_failed:
         print(f"\n{stats.signals_failed} signals failed - first few:")
         for line in stats.failures[:5]:
             print(f"  {line}")
-    print(f"\nmanifest: {out_dir}/manifest.csv")
+    print(f"\n{out_dir}/  ({WINDOWS_NAME}, {PARAMS_NAME}, {STATS_NAME})")
+    print(f"next: poetry run python make_splits.py --dataset {out_dir}")
     return 0
 
 

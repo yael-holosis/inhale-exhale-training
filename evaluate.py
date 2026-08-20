@@ -41,8 +41,9 @@ from models.lightning_module import PhaseSegmenter
 from phase import sources
 from phase.decode import decode
 from phase.labels import PHASES, spans_to_targets
+from phase.building import load_windows, resolve
 from phase.metrics import event_level, per_sample, phase_durations
-from phase.splits import patient_folds, split_for
+from phase.splits import split_for
 
 CONFIG_DIR = Path(__file__).parent / "parameter"
 REPORT_KEYS = ("macro_f1", "f1_inhale", "f1_exhale", "f1_stop", "f1_unknown",
@@ -82,21 +83,18 @@ def report(name: str, pred: np.ndarray, truth: np.ndarray) -> dict[str, float]:
     return scores
 
 
-def load_manifest(cfg) -> pd.DataFrame:
-    path = Path(cfg.data.dir) / "manifest.csv"
-    if not path.exists():
-        raise FileNotFoundError(f"no dataset at {path} - run build_dataset.py first")
-    return pd.read_csv(path)
+def dataset_of(cfg, override: str | None = None) -> Path:
+    return resolve(cfg.data.root, override or cfg.data.dir)
 
 
 def on_fold(args, cfg) -> int:
-    manifest = patient_folds(load_manifest(cfg), cfg.data.folds, seed=cfg.seed)
-    test = split_for(manifest, args.fold, cfg.data.val_fraction, seed=cfg.seed)["test"]
-    print(f"fold {args.fold}: {len(test)} windows, "
+    root = dataset_of(cfg, args.dataset)
+    manifest = load_windows(root)
+    test = split_for(manifest, args.fold)["test"]
+    print(f"{root}\nfold {args.fold}: {len(test)} windows, "
           f"{test['PatientID'].nunique()} held-out patients")
 
     model = load_model(args.checkpoint)
-    root = Path(cfg.data.dir)
     preds, truths = [], []
     for _, row in test.iterrows():
         values, target = window_samples(root, row)
@@ -116,8 +114,8 @@ def on_fold(args, cfg) -> int:
 
 def on_human(args, cfg) -> int:
     """Every window in the dataset that also carries human spans, scored three ways."""
-    manifest = load_manifest(cfg)
-    root = Path(cfg.data.dir)
+    root = dataset_of(cfg, args.dataset)
+    manifest = load_windows(root)
 
     rows = []
     for env, group in manifest.groupby("env"):
@@ -169,16 +167,14 @@ def main() -> int:
     parser.add_argument("--human", action="store_true",
                         help="score against BreathPhaseTimeRecord instead of the built labels")
     parser.add_argument("--fold", type=int, default=None)
-    parser.add_argument("--data-dir", default=None,
-                        help="override data.dir - a checkpoint outlives a config edit")
+    parser.add_argument("--dataset", default=None,
+                        help="which dataset directory - a checkpoint outlives a config edit")
     args = parser.parse_args()
 
     root = OmegaConf.load(CONFIG_DIR / "config.yaml")
     cfg = OmegaConf.merge(root, {"data": OmegaConf.load(CONFIG_DIR / "data" /
                                                         f"{root.defaults[0]['data']}.yaml")})
-    if args.data_dir:
-        cfg.data.dir = args.data_dir
-    args.fold = cfg.data.fold if args.fold is None else args.fold
+    args.fold = cfg.data.split.fold if args.fold is None else args.fold
     return on_human(args, cfg) if args.human else on_fold(args, cfg)
 
 

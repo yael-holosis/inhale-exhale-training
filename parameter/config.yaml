@@ -1,6 +1,6 @@
 # Hydra root. Everything a run depends on is here or in the groups below - no literals in code.
 defaults:
-  - data: algo_labels
+  - data: phases
   - model: unet1d
   - training: default
   - _self_

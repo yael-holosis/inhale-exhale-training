@@ -7,7 +7,6 @@ import pytest
 from tests import synthetic
 from phase.dataset import WindowDataset, class_weights, time_warp
 from phase.labels import EXHALE, INHALE, PHASES, STOP
-from phase.splits import patient_folds, split_for
 
 
 @pytest.fixture(scope="module")
@@ -61,39 +60,31 @@ def test_class_weights_are_capped():
     assert weights.min() >= 0.1
 
 
-def test_no_patient_appears_on_both_sides_of_a_split(built):
-    manifest, _ = built
-    folded = patient_folds(manifest, n_folds=3, seed=0)
-    splits = split_for(folded, fold=0, val_fraction=0.3, seed=0)
-    train = set(splits["train"]["PatientID"])
-    assert not train & set(splits["test"]["PatientID"])
-    assert not train & set(splits["val"]["PatientID"])
-    assert not set(splits["val"]["PatientID"]) & set(splits["test"]["PatientID"])
-
-
-def test_every_window_lands_in_exactly_one_fold(built):
-    manifest, _ = built
-    folded = patient_folds(manifest, n_folds=3, seed=0)
-    assert (folded["fold"] >= 0).all()
-    assert folded.groupby("PatientID")["fold"].nunique().max() == 1
-
-
-def test_more_folds_than_patients_is_refused(built):
-    manifest, _ = built
-    with pytest.raises(ValueError):
-        patient_folds(manifest, n_folds=99)
-
-
 def test_the_manifest_is_rebuilt_from_every_shard_present(tmp_path):
     """A second run - the other environment, or more patients - extends the set.
 
-    Rebuilt from the directory rather than from the run's plan, so an index written by the
-    `ds_algo` run still names the `ds_prod` shards beside it.
+    Read from the directory rather than from the run's own selection, so an index written by one
+    run still names the shards a previous one left beside it.
     """
-    from phase.building import rebuild_manifest
+    from phase.building import read_windows
 
     synthetic.build(tmp_path, n_patients=2, signals_per_patient=1, windows_per_signal=2)
-    rebuilt = rebuild_manifest(tmp_path)
+    rebuilt = read_windows(tmp_path)
     assert len(rebuilt) == 4
     assert set(rebuilt["env"]) == {synthetic.ENV}
     assert rebuilt["shard"].str.startswith(synthetic.ENV).all()
+
+
+def test_rebuilding_the_manifest_preserves_an_existing_split(tmp_path):
+    """Extending a dataset must not drop the record of where the existing windows went."""
+    from phase.building import load_windows, read_windows, write_windows
+    from phase.splits import SPLIT_COLUMN
+
+    frame = synthetic.build(tmp_path, n_patients=4, signals_per_patient=1, windows_per_signal=2)
+    frame[SPLIT_COLUMN] = ["train"] * (len(frame) - 2) + ["test"] * 2
+    write_windows(tmp_path, frame)
+
+    rebuilt = read_windows(tmp_path)
+    assert SPLIT_COLUMN in rebuilt.columns
+    assert rebuilt[SPLIT_COLUMN].value_counts().to_dict() == {"train": len(frame) - 2, "test": 2}
+    assert set(load_windows(tmp_path).columns) >= {SPLIT_COLUMN, "RespirationWindowID"}

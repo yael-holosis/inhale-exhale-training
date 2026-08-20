@@ -1,55 +1,53 @@
-"""Build the training set from the windows already in `RespirationWindow`, labelled by the algorithm.
+"""Build a dataset: one directory per build, carrying the windows, their labels and its own provenance.
 
-**No raw scan is read.** The windows already exist: something has run the production pipeline on
-the scans and stored each window it produced - the samples in S3, the row in `RespirationWindow`.
-This repo reads those objects (`phase.sources`) and asks production's own
-`calculate_inhale_exhale_time` what it calls on them (`phase.production`, on `holosissystem`
-directly). That is the whole build: two reads and a function call, no pipeline, no scan download,
-no disk pressure.
+A dataset directory is self-describing on purpose. Six months from now the only question that
+matters about a checkpoint is what it was trained on, and the answer has to be readable off disk
+rather than reconstructed from a config file that has moved on:
 
-It also means the training windows are **the same objects a labeller sees**, byte for byte.
-`RespirationWindowID` travels into the manifest, so a human label written later joins straight
-onto the row the network was trained on - no re-derivation, no risk of the two describing
-different samples.
+    data_sets/phases_algorithm_20260820T165400Z/
+      build_params.yaml            every parameter that decided this dataset, plus versions
+      windows.csv                  one row per window: provenance, class counts, split columns
+      stats.yaml                   hours, class balance, per-patient and per-cohort counts
+      ds_algo_signal_1557424.npz   the samples and the per-sample targets, one file per signal
 
-Growing the pool means uploading more windows, which is a write to `RespirationWindow` and is
-therefore not done from here: **this repo has no writer**.
+**No raw scan is read.** The pipeline already ran when these windows were uploaded; this reads
+each window's samples from S3 and labels them from whichever source `data.labels.source` names -
+see `phase/labelsources.py` for what each one is and is not.
 
-## What the labels are, and are not
+**A directory is one label source.** Extending a build with `--into` refuses to mix them: an
+algorithm-labelled window and a human-labelled one are different targets, and a set that silently
+contained both would train a model against a moving definition.
 
-`suggestion.suggest` is production's answer mapped back onto the stored trace. Two properties
-carry into every number measured on this set:
-
-- **The boundaries are the 10% and 90% amplitude crossings** - rise and fall times, a median 65%
-  of the true trough-to-crest rise (`inhale-exhale-detection/claude/FINDINGS.md`, finding 5).
-- **The ceiling is the teacher.** Where the algorithm is wrong, the target is wrong. Only the
-  human spans in `BreathPhaseTimeRecord` measure either of them.
-
-`unknown` also means two things here. A labeller marks it where they could not call the trace;
-production leaves it in the same places *and* at the turn from inhale to exhale on every breath,
-because it has no phase for that turn. Anything reading `unknown` as "no breathing" will be
-wrong most of the time it fires.
+Every row carries `RespirationWindowID`, so the same window can be found in the database, in the
+labelling app, and in this dataset without re-deriving anything.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import yaml
 
-from phase import production, sources
+from phase import sources
+from phase.labelsources import LabelSource
 from phase.labels import PHASES, class_counts, spans_to_targets
 
-MANIFEST_NAME = "manifest.csv"
-SUMMARY_NAME = "build_summary.yaml"
+WINDOWS_NAME = "windows.csv"
+PARAMS_NAME = "build_params.yaml"
+STATS_NAME = "stats.yaml"
 SHARD_TEMPLATE = "{env}_signal_{signal_id}.npz"
 """Environment first, and it has to be. `ds_algo` and `ds_prod` have unrelated `RadarSignal` ID
 spaces - signal 2120091 is a different recording on each - so one filename would silently
-overwrite the other's samples. The app repo prefixes its S3 window keys for the same reason."""
+overwrite the other's samples."""
+
+DIR_TEMPLATE = "{name}_{source}_{stamp}"
+STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 
 
 @dataclass
@@ -58,41 +56,60 @@ class BuildStats:
     signals_built: int = 0
     signals_failed: int = 0
     windows_kept: int = 0
-    windows_no_phases: int = 0
+    windows_unlabelled: int = 0
     samples: int = 0
     failures: list[str] = field(default_factory=list)
+
+
+def stamp() -> str:
+    """UTC, because the two instances run their clocks in UTC and a local stamp would not sort."""
+    return datetime.now(timezone.utc).strftime(STAMP_FORMAT)
+
+
+def dataset_dir(root: str | Path, name: str, source: str, when: str | None = None) -> Path:
+    return Path(root) / DIR_TEMPLATE.format(name=name, source=source, stamp=when or stamp())
+
+
+def resolve(root: str | Path, wanted: str) -> Path:
+    """A dataset directory by name, or `latest` for the newest build under `root`.
+
+    Newest by directory name, not by mtime: the name carries the build's own start time, and an
+    mtime moves whenever anything in the directory is rewritten - `make_splits.py`, for one.
+    """
+    root = Path(root)
+    if wanted and wanted != "latest":
+        return Path(wanted) if Path(wanted).is_absolute() or Path(wanted).exists() else root / wanted
+    candidates = sorted(path for path in root.glob("*") if (path / WINDOWS_NAME).exists())
+    if not candidates:
+        raise FileNotFoundError(f"no dataset under {root} - run build_dataset.py first")
+    return candidates[-1]
+
+
+def existing_params(directory: Path) -> dict[str, Any]:
+    path = Path(directory) / PARAMS_NAME
+    if not path.exists():
+        return {}
+    with open(path) as handle:
+        return yaml.safe_load(handle) or {}
 
 
 # --------------------------------------------------------------------------------- selection
 
 def catalogue(env_key: str) -> pd.DataFrame:
-    """Every uploaded window with its signal and patient. See `phase.sources.catalogue`.
-
-    Carries `Spans`, the number of human phase records on the window. Zero is the normal case.
-    """
+    """Every uploaded window with its signal and patient. See `phase.sources.catalogue`."""
     return sources.catalogue(env_key)
 
 
-def select(catalogue_frame: pd.DataFrame, patients: list[str] | None = None,
+def select(frame: pd.DataFrame, patients: list[str] | None = None,
            signals: list[int] | None = None, per_patient: int | None = None,
-           unlabelled_only: bool = False, seed: int = 0) -> pd.DataFrame:
-    """Narrow the catalogue. Signal-level, because a shard is a signal.
-
-    `per_patient` caps how many **signals** a patient contributes, sampled seeded and spread
-    across sessions so one long night does not dominate. `unlabelled_only` holds back the
-    windows a person has already labelled, so they can serve as a clean test set.
-    """
-    frame = catalogue_frame
+           seed: int = 0) -> pd.DataFrame:
+    """Narrow the catalogue. Signal-level, because a shard is a signal."""
     if patients:
         wanted = tuple(patients)
-        keep = (frame["Patient"].astype(str).str.startswith(wanted)
-                | frame["PatientKey"].astype(str).str.startswith(wanted))
-        frame = frame[keep]
+        frame = frame[frame["Patient"].astype(str).str.startswith(wanted)
+                      | frame["PatientKey"].astype(str).str.startswith(wanted)]
     if signals:
         frame = frame[frame["RadarSignalID"].isin([int(value) for value in signals])]
-    if unlabelled_only:
-        labelled = frame.loc[frame["Spans"] > 0, "RadarSignalID"].unique()
-        frame = frame[~frame["RadarSignalID"].isin(labelled)]
     if not per_patient:
         return frame
 
@@ -100,14 +117,17 @@ def select(catalogue_frame: pd.DataFrame, patients: list[str] | None = None,
     for patient, rows in frame.groupby("Patient", sort=True):
         by_signal = rows.drop_duplicates("RadarSignalID")[["RadarSignalID", "SessionID"]]
         rng = np.random.default_rng(_patient_seed(seed, str(patient)))
-        chosen, sessions = [], {session: list(group["RadarSignalID"])
-                                for session, group in by_signal.groupby("SessionID", sort=True)}
+        sessions = {session: list(group["RadarSignalID"])
+                    for session, group in by_signal.groupby("SessionID", sort=True)}
         order = list(sessions)
         rng.shuffle(order)
         for values in sessions.values():
             rng.shuffle(values)
+        chosen: list[int] = []
+        # One signal per session, then round again - a patient with a thousand sessions must not
+        # contribute a thousand near-identical minutes of one night.
         while len(chosen) < per_patient and any(sessions.values()):
-            for session in order:                    # one per session, then round again
+            for session in order:
                 if sessions[session] and len(chosen) < per_patient:
                     chosen.append(sessions[session].pop())
         taken.append(rows[rows["RadarSignalID"].isin(chosen)])
@@ -115,7 +135,7 @@ def select(catalogue_frame: pd.DataFrame, patients: list[str] | None = None,
 
 
 def _patient_seed(seed: int, patient: str) -> int:
-    """A digest, not `hash()` - Python randomises string hashing per process, so `--seed` would
+    """A digest, not `hash()` - Python randomises string hashing per process, so a seed would
     otherwise draw a different sample on every invocation."""
     import hashlib
 
@@ -125,41 +145,37 @@ def _patient_seed(seed: int, patient: str) -> int:
 
 # ---------------------------------------------------------------------------------- one signal
 
-def windows_of_signal(env_key: str, signal_id: int, rows: pd.DataFrame,
-                      requires_rate: bool = True) -> list[dict[str, Any]]:
-    """One signal's stored windows, each with its samples and the algorithm's phases on them.
+def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str, Any]]:
+    """One signal's stored windows, each with its samples and its per-sample target.
 
-    The samples are read as stored, never re-oriented: the blob is already the trace the app
-    shows and `ReviewerFlipped` describes that object, so turning it over here would put the
-    labels on a picture nobody has seen.
+    Samples are read as stored, never re-oriented: the blob is already the trace the labelling
+    app shows and `ReviewerFlipped` describes *that object*, so turning it over here would put
+    the labels on a picture nobody has seen.
 
-    A window the detector cannot answer for is **kept** with an empty span list and counted, not
-    dropped - "the algorithm found nothing here" is a training signal, and dropping those windows
-    would bias the set towards easy breathing.
+    A window the source cannot label is **kept**, empty, and counted - except under `human`,
+    where `eligible` has already removed the unlabelled ones. "The algorithm found nothing here"
+    is a training signal; dropping those windows would bias the set towards easy breathing.
     """
     out = []
     for _, row in rows.sort_values("WindowIndex").iterrows():
-        t_sec, values = sources.window_samples(str(row["WaveformS3Path"]))
+        _, values = sources.window_samples(str(row["WaveformS3Path"]))
         values = np.asarray(values, dtype=np.float32)
         if not values.size:
             continue
-        rate = None if pd.isna(row.get("RespirationRate")) else float(row["RespirationRate"])
-        fps = float(row["AnalysisFps"])
-        spans, note = ([], "no stored rate") if (requires_rate and not rate) else \
-            production.phases_for(values, rate, fps)
+        spans, note = labels.rows_for(row, values)
         out.append({
             "window_id": int(row["ID"]),
             "window_index": int(row["WindowIndex"]),
             "start_index": int(row["StartIndex"]),
-            "analysis_fps": fps,
-            "respiration_rate": rate,
+            "analysis_fps": float(row["AnalysisFps"]),
+            "respiration_rate": (None if pd.isna(row.get("RespirationRate"))
+                                 else float(row["RespirationRate"])),
             "range_bin": None if pd.isna(row.get("RangeBin")) else int(row["RangeBin"]),
             "reviewer_flipped": bool(row.get("ReviewerFlipped", False)),
-            "system_version": "" if pd.isna(row.get("SystemVersion")) else
-                              str(row["SystemVersion"]),
-            "spans": spans, "note": note,
-            "t_sec": np.asarray(t_sec, dtype=np.float32),
-            "values": values,
+            "system_version": ("" if pd.isna(row.get("SystemVersion"))
+                               else str(row["SystemVersion"])),
+            "human_spans": int(row.get("Spans", 0) or 0),
+            "spans": spans, "note": note, "values": values,
             "target": spans_to_targets(spans, values.size),
         })
     return out
@@ -188,6 +204,7 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
                                for w in windows], dtype=np.int64),
         "reviewer_flipped": np.array([w["reviewer_flipped"] for w in windows], dtype=bool),
         "n_spans": np.array([len(w["spans"]) for w in windows], dtype=np.int64),
+        "human_spans": np.array([w["human_spans"] for w in windows], dtype=np.int64),
         "system_version": np.array([w["system_version"] for w in windows]),
         "signal_id": np.int64(signal_id),
         "patient": np.str_(patient),
@@ -197,33 +214,31 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
     }
 
 
-# --------------------------------------------------------------------------------- the build
+# ------------------------------------------------------------------------------------ the build
 
-def build(env_key: str, out_dir: Path, patients: list[str] | None = None,
-          signals: list[int] | None = None, per_patient: int | None = None,
-          unlabelled_only: bool = False, seed: int = 0, requires_rate: bool = True,
+def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] | None = None,
+          signals: list[int] | None = None, per_patient: int | None = None, seed: int = 0,
           limit: int | None = None, log=print) -> tuple[pd.DataFrame, BuildStats]:
     """Read the selected signals' windows and write one shard each.
 
-    Resumable: a shard already on disk is left alone. The window blobs are immutable once
-    uploaded - the app repo refuses to overwrite one, because the labels already made against it
-    would then describe samples that are not there - so a resumed build cannot mix two versions
-    of a window. It re-reads nothing it already has.
+    Resumable: a shard already on disk is left alone. A window blob is immutable once uploaded,
+    so a shard can never be stale - only absent.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen = select(catalogue(env_key), patients, signals, per_patient, unlabelled_only, seed)
+    chosen = labels.eligible(select(catalogue(env_key), patients, signals, per_patient, seed))
     if chosen.empty:
-        log("no uploaded windows match that selection")
-        return rebuild_manifest(out_dir), BuildStats()
+        log(f"no window on {env_key} matches that selection and can be labelled by "
+            f"`{labels.source}`")
+        return read_windows(out_dir), BuildStats()
 
     by_signal = chosen.drop_duplicates("RadarSignalID")
     if limit:
         by_signal = by_signal.head(limit)
     stats = BuildStats(signals_planned=len(by_signal))
     log(f"{len(chosen)} windows over {stats.signals_planned} signals, "
-        f"{chosen['Patient'].nunique()} patients")
+        f"{chosen['Patient'].nunique()} patients, labelled by `{labels.source}`")
 
     started = time.time()
     for count, (_, row) in enumerate(by_signal.iterrows(), start=1):
@@ -233,9 +248,7 @@ def build(env_key: str, out_dir: Path, patients: list[str] | None = None,
             stats.signals_built += 1
             continue
         try:
-            windows = windows_of_signal(env_key, signal_id,
-                                        chosen[chosen["RadarSignalID"] == signal_id],
-                                        requires_rate)
+            windows = windows_of_signal(chosen[chosen["RadarSignalID"] == signal_id], labels)
         except Exception as error:                                        # noqa: BLE001
             stats.signals_failed += 1
             stats.failures.append(f"{signal_id}: {type(error).__name__}: {error}")
@@ -252,42 +265,68 @@ def build(env_key: str, out_dir: Path, patients: list[str] | None = None,
                                             windows))
         stats.signals_built += 1
         stats.windows_kept += len(windows)
-        stats.windows_no_phases += sum(1 for w in windows if not w["spans"])
+        stats.windows_unlabelled += sum(1 for w in windows if not w["spans"])
         stats.samples += sum(int(w["values"].size) for w in windows)
         if count % 25 == 0 or count == stats.signals_planned:
             rate = (time.time() - started) / count
             log(f"  [{count}/{stats.signals_planned}] {stats.windows_kept} windows, "
                 f"{rate:.1f}s/signal, ~{rate * (stats.signals_planned - count) / 60:.0f} min left")
 
-    # Rebuilt from every shard in the directory, not from this run's selection. A second run -
-    # the other environment, or more patients - must extend the set rather than replace its index
-    # with only what it happened to touch.
-    manifest = rebuild_manifest(out_dir)
-    if not manifest.empty:
-        manifest.to_csv(out_dir / MANIFEST_NAME, index=False)
-    return manifest, stats
+    windows_frame = read_windows(out_dir)
+    if not windows_frame.empty:
+        write_windows(out_dir, windows_frame)
+    return windows_frame, stats
 
 
-def rebuild_manifest(out_dir: Path) -> pd.DataFrame:
-    """The index, read back off the shards. Cheap - only the small arrays are touched."""
-    rows: list[dict[str, Any]] = []
-    for path in sorted(Path(out_dir).glob("*_signal_*.npz")):
-        with np.load(path, allow_pickle=False) as stored:
-            rows.extend(_manifest_from_shard(stored, path.name))
-    return pd.DataFrame(rows)
+def write_windows(out_dir: Path, frame: pd.DataFrame) -> Path:
+    path = Path(out_dir) / WINDOWS_NAME
+    frame.to_csv(path, index=False)
+    return path
 
 
-def _manifest_from_shard(stored, shard: str) -> list[dict[str, Any]]:
-    """A shard's manifest rows. One per window, and `RespirationWindowID` is the join key.
+def load_windows(directory: Path) -> pd.DataFrame:
+    """`windows.csv` as written, split columns included if `make_splits.py` has run."""
+    path = Path(directory) / WINDOWS_NAME
+    if not path.exists():
+        raise FileNotFoundError(f"no {WINDOWS_NAME} in {directory} - run build_dataset.py first")
+    return pd.read_csv(path)
 
-    That column is what lets a human label written months from now be matched to the exact
-    window the network trained on, rather than to a re-derived approximation of it.
+
+def read_windows(out_dir: Path) -> pd.DataFrame:
+    """Rebuild the index off the shards, preserving any split columns already assigned.
+
+    Read from the directory rather than from the run's own selection, so a second run - the other
+    environment, more patients - extends the set instead of replacing its index with only what it
+    happened to touch. Splits are carried over by `RespirationWindowID`: extending a dataset must
+    not silently drop the record of where the existing windows went.
     """
+    out_dir = Path(out_dir)
+    rows: list[dict[str, Any]] = []
+    for path in sorted(out_dir.glob("*_signal_*.npz")):
+        with np.load(path, allow_pickle=False) as stored:
+            rows.extend(_rows_of_shard(stored, path.name))
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+
+    previous = out_dir / WINDOWS_NAME
+    if previous.exists():
+        stored = pd.read_csv(previous)
+        carried = [c for c in stored.columns if c == "split" or c.endswith("_split")]
+        if carried:
+            frame = frame.merge(stored[["RespirationWindowID", *carried]],
+                                on="RespirationWindowID", how="left")
+    return frame
+
+
+def _rows_of_shard(stored, shard: str) -> list[dict[str, Any]]:
+    """A shard's rows. `RespirationWindowID` is the join key back to the database."""
     offsets, targets = stored["offsets"], stored["targets"]
     rows = []
     for position in range(len(offsets) - 1):
         counts = class_counts(targets[offsets[position]:offsets[position + 1]].astype(np.int64))
         rate = float(stored["respiration_rate"][position])
+        labelled = int(stored["n_spans"][position])
         rows.append({
             "env": str(stored["env"]), "shard": shard, "position": position,
             "RespirationWindowID": int(stored["window_id"][position]),
@@ -303,7 +342,57 @@ def _manifest_from_shard(stored, shard: str) -> list[dict[str, Any]]:
             "range_bin": int(stored["range_bin"][position]),
             "reviewer_flipped": bool(stored["reviewer_flipped"][position]),
             "system_version": str(stored["system_version"][position]),
-            "n_spans": int(stored["n_spans"][position]),
+            "n_spans": labelled,
+            "labelled": labelled > 0,
+            # A snapshot at build time, unlike every other column here: it counts the human spans
+            # on this window when it was read, and labelling continues afterwards.
+            "human_spans": int(stored["human_spans"][position])
+                           if "human_spans" in stored else 0,
             **{f"n_{name}": counts[name] for name in PHASES},
         })
     return rows
+
+
+# ------------------------------------------------------------------------------------ provenance
+
+def summarise(frame: pd.DataFrame) -> dict[str, Any]:
+    """`stats.yaml`: what is in this dataset, in the terms anybody would ask about it."""
+    per_class = {name: int(frame[f"n_{name}"].sum()) for name in PHASES}
+    samples = max(sum(per_class.values()), 1)
+    out = {
+        "windows": int(len(frame)),
+        "signals": int(frame["RadarSignalID"].nunique()),
+        "patients": int(frame["PatientID"].nunique()),
+        "environments": sorted(frame["env"].astype(str).unique()),
+        "samples": samples,
+        "hours": round(samples / 10.0 / 3600.0, 2),
+        "windows_unlabelled": int((~frame["labelled"]).sum()),
+        "windows_with_human_spans": int((frame["human_spans"] > 0).sum()),
+        "per_class": per_class,
+        "per_class_fraction": {name: round(count / samples, 4)
+                               for name, count in per_class.items()},
+        "per_environment": {str(env): int(n) for env, n in frame["env"].value_counts().items()},
+        "windows_per_patient": {str(patient): int(n) for patient, n
+                                in frame["PatientID"].value_counts().items()},
+    }
+    for column in [c for c in frame.columns if c == "split" or c.endswith("_split")]:
+        out.setdefault("splits", {})[column] = {
+            str(value): int(n) for value, n in frame[column].value_counts().items()}
+    return out
+
+
+def write_provenance(out_dir: Path, params: dict[str, Any], frame: pd.DataFrame) -> None:
+    """`build_params.yaml` and `stats.yaml`, rewritten whole on every run.
+
+    `build_params.yaml` accumulates a `runs` list, so a directory extended with a second
+    environment records both invocations rather than only the last.
+    """
+    out_dir = Path(out_dir)
+    existing = existing_params(out_dir)
+    runs = list(existing.get("runs", []))
+    runs.append(params)
+    with open(out_dir / PARAMS_NAME, "w") as handle:
+        yaml.safe_dump({"labels": params["labels"], "created": existing.get("created")
+                        or params["started"], "runs": runs}, handle, sort_keys=False)
+    with open(out_dir / STATS_NAME, "w") as handle:
+        yaml.safe_dump(summarise(frame), handle, sort_keys=False)

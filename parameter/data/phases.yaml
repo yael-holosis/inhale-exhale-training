@@ -1,0 +1,84 @@
+# The dataset: one respiration window per row, one class per sample.
+#
+# Windows are read from `RespirationWindow` and S3 - **no raw scan is downloaded**, the pipeline
+# already ran when they were uploaded. What differs between datasets is where the *labels* come
+# from; see `labels.source` below.
+name: phases
+
+# The dataset directory to train on. Each build writes a new timestamped one, so this names a
+# specific dataset rather than a moving target - a run is reproducible from the directory alone.
+# `latest` resolves to the newest build under `root`.
+root: data_sets
+dir: latest
+
+# Which instance. `ds_algo` is the data-science cohort - the SL sleep-lab nights; `ds_prod` is
+# the pilots. Run each separately into the same dataset directory with `--into`; nothing is ever
+# written to production.
+env: ds_algo
+# Patient prefixes, matching the display name (SL0066) or the patient key (algo-p089, bs-).
+# Null is every patient with uploaded windows.
+patients: null
+# Cap on signals per patient, sampled seeded and spread across sessions. Null takes everything
+# uploaded - the right setting while the uploaded pool is this small.
+signals_per_patient: null
+sample_seed: 20260819
+
+labels:
+  # Where the per-sample target comes from. The two are different datasets and are never mixed
+  # in one directory - the build records which was used and refuses to extend a directory built
+  # the other way.
+  #
+  #   algorithm - production's own `calculate_inhale_exhale_time`, re-run on the stored window.
+  #               Available for every window, so this is what there is enough of to train on.
+  #               It is distillation: the ceiling is the current algorithm, and its boundaries
+  #               are 10-90% amplitude crossings rather than phase durations.
+  #
+  #   human     - `BreathPhaseTimeRecord`, the spans a person actually drew. The real target,
+  #               and the only thing that measures correctness - but only a few dozen windows
+  #               carry one today, which is why the first runs use `algorithm`.
+  source: algorithm
+
+  # `human` only. Null takes every labelled window; an id takes one person's work alone, which
+  # is what an inter-labeller comparison needs.
+  labeler_id: null
+  # `human` only, and only where two people have labelled the same window: whose reading wins.
+  #   latest    - the most recent, by RecordCreationTime
+  #   lowest_id - the first labeller by id, so the choice does not move as people re-save
+  on_conflict: latest
+
+  # A window with no stored rate gives the detector nothing to run at - it filters at roughly
+  # twice the rate - so it carries no algorithm phases. Kept and labelled entirely unknown:
+  # "the algorithm found nothing here" is a training signal, and dropping those windows would
+  # bias the set towards easy breathing. `human` ignores this - a person needs no rate.
+  requires_rate: true
+
+# How the data is cut. Nothing about this is decided in code - see phase/splits.py. Written into
+# the dataset directory by `make_splits.py`, not recomputed at train time, so the record of which
+# window went where survives the run.
+split:
+  # Held out once, by patient, and never trained on in any fold. Every fold therefore reports
+  # against the same test set, which is what makes fold numbers comparable.
+  test_fraction: 0.2
+  # Folds rotate the validation set inside the remaining patients.
+  folds: 5
+  fold: 0
+  seed: 20260820
+  # The unit a split may not cut through. `PatientID` is a display name and the two instances
+  # have unrelated identity spaces, so the environment is part of the identity: without it, two
+  # different people sharing a name would merge into one group and land on both sides.
+  group_columns: [env, PatientID]
+  # A composite key, one value per group, balanced across test and across folds. `env` is the
+  # cohort: the instances differ in acquisition (ds_algo is roughly half 300 fps two-antenna,
+  # ds_prod entirely 200 fps), so a split that ignores it puts folds on different populations.
+  # Empty list disables stratification.
+  stratify_cols: [env]
+
+# 200 samples = the pipeline's own 20 s window at 10 fps. Longer windows (it grows one by 5 s and
+# retries when it cannot find three breaths) are cropped; shorter ones are padded and masked.
+crop_samples: 200
+# 'window' z-scores each item on its own statistics - what the device can do at inference, since
+# it has no corpus statistics to hand.
+normalise: window
+
+batch_size: 64
+num_workers: 4

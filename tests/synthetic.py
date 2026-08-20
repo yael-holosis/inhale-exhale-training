@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from phase.labels import EXHALE, INHALE, STOP, UNKNOWN, class_counts
-from phase.building import MANIFEST_NAME, SHARD_TEMPLATE
+from phase.building import SHARD_TEMPLATE, write_windows
 from phase.labels import PHASES
 
 ENV = "synthetic"
@@ -58,13 +58,14 @@ def window(samples: int, rate_bpm: float, fps: float, rng) -> tuple[np.ndarray, 
 
 def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
           windows_per_signal: int = 4, samples: int = 200, fps: float = 10.0,
-          seed: int = 0) -> pd.DataFrame:
+          seed: int = 0, environments: tuple[str, ...] = (ENV,)) -> pd.DataFrame:
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(seed)
     rows, signal_id = [], 1000
 
     for patient in range(n_patients):
+        env = environments[patient % len(environments)]
         name = f"synth-{patient:03d}"
         rate = float(rng.uniform(8, 22))
         for _ in range(signals_per_patient):
@@ -76,7 +77,7 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
                 targets.append(t)
             lengths = np.array([v.size for v in values], dtype=np.int64)
             offsets = np.concatenate(([0], np.cumsum(lengths)))
-            shard = SHARD_TEMPLATE.format(env=ENV, signal_id=signal_id)
+            shard = SHARD_TEMPLATE.format(env=env, signal_id=signal_id)
             np.savez_compressed(
                 root / shard,
                 values=np.concatenate(values).astype(np.float32),
@@ -90,23 +91,24 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
                 range_bin=np.zeros(windows_per_signal, dtype=np.int64),
                 reviewer_flipped=np.zeros(windows_per_signal, dtype=bool),
                 n_spans=np.full(windows_per_signal, 3, dtype=np.int64),
+                human_spans=np.zeros(windows_per_signal, dtype=np.int64),
                 system_version=np.array(["0.6.6"] * windows_per_signal),
                 signal_id=np.int64(signal_id), patient=np.str_(name),
-                patient_key=np.str_(name), session_id=np.int64(patient), env=np.str_(ENV))
+                patient_key=np.str_(name), session_id=np.int64(patient), env=np.str_(env))
             for position in range(windows_per_signal):
                 counts = class_counts(targets[position])
-                rows.append({"env": ENV, "shard": shard, "position": position,
+                rows.append({"env": env, "shard": shard, "position": position,
                              "RespirationWindowID": signal_id * 100 + position,
                              "RadarSignalID": signal_id, "SessionID": patient,
                              "PatientID": name, "PatientKey": name, "WindowIndex": position,
                              "start_index": position * 50, "samples": samples,
                              "analysis_fps": fps, "respiration_rate": rate, "range_bin": 0,
                              "reviewer_flipped": False, "system_version": "0.6.6",
-                             "n_spans": 3,
+                             "n_spans": 3, "labelled": True, "human_spans": 0,
                              **{f"n_{phase}": counts[phase] for phase in PHASES}})
 
     manifest = pd.DataFrame(rows)
-    manifest.to_csv(root / MANIFEST_NAME, index=False)
+    write_windows(root, manifest)
     return manifest
 
 
