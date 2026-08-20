@@ -73,9 +73,16 @@ split:
   # Empty list disables stratification.
   stratify_cols: [env]
 
-# 200 samples = the pipeline's own 20 s window at 10 fps. Longer windows (it grows one by 5 s and
-# retries when it cannot find three breaths) are cropped; shorter ones are padded and masked.
-crop_samples: 200
+# Null keeps every window at its own length: the network is fully convolutional, and the only
+# thing that ever wanted a common length is the tensor a batch is stacked into - which `collate`
+# handles by padding to the batch's own longest member and masking the padding.
+#
+# Set a number only under memory pressure, and knowing the cost: 6.3% of windows are longer than
+# 200 samples and they are the *hard* ones - the pipeline grows a window by 5 s and retries
+# exactly when it cannot find three breaths in it, so a 200-sample crop throws away the slow and
+# irregular breathing first. Measured on the built set it discards 2.9% of samples, all of them
+# from that 6.3%.
+crop_samples: null
 # 'window' z-scores each item on its own statistics - what the device can do at inference, since
 # it has no corpus statistics to hand.
 normalise: window

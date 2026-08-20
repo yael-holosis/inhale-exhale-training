@@ -31,7 +31,7 @@ from models.lightning_module import PhaseSegmenter
 from phase import figures
 from phase.building import load_windows, resolve
 from phase.decode import decode
-from phase.dataset import WindowDataset, class_weights
+from phase.dataset import WindowDataset, class_weights, collate
 from phase.labels import PHASES
 from phase.splits import SPLIT_COLUMN, describe, split_for
 
@@ -47,6 +47,7 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
                                 normalise=cfg.data.normalise, seed=cfg.seed)
         out[name] = DataLoader(dataset, batch_size=cfg.data.batch_size, shuffle=train,
                                num_workers=cfg.data.num_workers, drop_last=train,
+                               collate_fn=collate,
                                persistent_workers=cfg.data.num_workers > 0)
     return out
 

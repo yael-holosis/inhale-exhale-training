@@ -124,3 +124,44 @@ def test_choosing_more_than_there_are_is_not_an_error():
 
     assert len(figures.choose([{"score": 0.5}], 10, figures.SPREAD)) == 1
     assert figures.choose([], 5) == []
+
+
+def test_a_window_keeps_its_own_length_when_there_is_no_crop(built):
+    manifest, root = built
+    dataset = WindowDataset(manifest, root, crop=None)
+    values, _ = dataset._window(0)
+    item = dataset[0]
+    assert item["x"].shape == (1, values.size)
+    assert item["mask"].all()
+
+
+def test_collate_pads_a_ragged_batch_and_masks_the_padding():
+    """Windows differ in length; nothing may be cropped to fit a tensor."""
+    import torch
+
+    from phase.dataset import collate
+
+    batch = [{"x": torch.ones(1, n), "y": torch.full((n,), 2, dtype=torch.long),
+              "mask": torch.ones(n, dtype=torch.bool), "row": index}
+             for index, n in enumerate((200, 350, 250))]
+    out = collate(batch)
+    assert out["x"].shape == (3, 1, 350)
+    assert out["mask"].sum().item() == 200 + 350 + 250
+    # Every real sample is kept, and every padded one is masked out.
+    for position, n in enumerate((200, 350, 250)):
+        assert out["mask"][position, :n].all()
+        assert not out["mask"][position, n:].any()
+        assert (out["x"][position, 0, n:] == 0).all()
+
+
+def test_the_model_takes_a_ragged_batch_after_collate():
+    import torch
+
+    from models.unet1d import UNet1D
+    from phase.dataset import collate
+
+    batch = [{"x": torch.randn(1, n), "y": torch.zeros(n, dtype=torch.long),
+              "mask": torch.ones(n, dtype=torch.bool), "row": 0} for n in (200, 450)]
+    out = collate(batch)
+    logits = UNet1D(channels=(16, 24, 32), bottleneck=48)(out["x"])
+    assert logits.shape == (2, 4, 450)

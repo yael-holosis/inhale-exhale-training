@@ -1,8 +1,17 @@
 """The torch dataset over the built shards, and the augmentations that are safe on it.
 
-One item is one window: a 1-channel trace and its per-sample target, cropped or padded to a
-fixed length for batching. Inference does not use this - the network is fully convolutional and
-takes a whole signal.
+One item is one window: a 1-channel trace and its per-sample target.
+
+**Windows keep their own length.** The network is fully convolutional and takes any length; the
+only thing that ever wanted a common one is the tensor a DataLoader stacks, and `collate` solves
+that by padding each batch to its own longest member and masking the padding - which the loss and
+the metrics already honour. Nothing is discarded.
+
+A fixed `crop` is still available and is what a memory-bound run would use, but it is not the
+default and it is not free: 6.3% of windows are longer than 200 samples, and they are the *hard*
+ones. The pipeline grows a window by 5 s and retries precisely when it cannot find three breaths
+in it, so cropping them back to 200 throws away the slow and irregular breathing first. Measured
+on the built set, a 200-sample crop discards 2.9% of samples and all of them come from that 6.3%.
 
 **The polarity flip is the augmentation that matters.** The sign of a stored window is arbitrary
 - `select_waveform` returns whichever of a bin's real / imaginary parts has the larger std - so
@@ -44,12 +53,12 @@ class WindowDataset(Dataset):
 
     PAD_LABEL = UNKNOWN
 
-    def __init__(self, manifest: pd.DataFrame, root: str | Path, crop: int = 200,
+    def __init__(self, manifest: pd.DataFrame, root: str | Path, crop: int | None = None,
                  train: bool = False, augment: dict[str, Any] | None = None,
                  normalise: str = "window", seed: int = 0):
         self.rows = manifest.reset_index(drop=True)
         self.root = Path(root)
-        self.crop = int(crop)
+        self.crop = int(crop) if crop else None
         self.train = bool(train)
         self.augment = dict(augment or {})
         self.normalise = normalise
@@ -92,7 +101,9 @@ class WindowDataset(Dataset):
 
     def _fit(self, values: np.ndarray, target: np.ndarray,
              rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Crop or pad to `self.crop`. Padding is masked, never learned from."""
+        """Crop or pad to `self.crop`, or leave the window alone when there is no crop."""
+        if self.crop is None:
+            return values, target, np.ones(values.size, dtype=bool)
         length = values.size
         if length >= self.crop:
             spare = length - self.crop
@@ -162,6 +173,32 @@ def baseline_drift(length: int, scale: float, rng) -> np.ndarray:
         cycles = float(rng.uniform(0.25, 1.0))
         drift += np.sin(2 * np.pi * cycles * t + rng.uniform(0, 2 * np.pi)).astype(np.float32)
     return (scale * drift / 2.0).astype(np.float32)
+
+
+def collate(batch: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Stack items of differing length, padding each batch to its own longest member.
+
+    The padding is masked, and both the loss and the metrics already drop masked samples - so a
+    window is never cropped to fit a tensor and never learned from beyond its own end.
+
+    Padded with zeros rather than by replication: a replicated edge is a flat run that looks like
+    a held breath, and although it is masked out of the loss it still enters the receptive field
+    of the samples before it. Zeros after a mean-removed window are its own baseline.
+
+    No length bucketing. On this set 94% of windows are exactly 200 samples, so a random batch is
+    almost always uniform already and sorting by length would buy padding it does not spend.
+    """
+    longest = max(int(item["x"].shape[-1]) for item in batch)
+    x = torch.zeros(len(batch), batch[0]["x"].shape[0], longest)
+    y = torch.zeros(len(batch), longest, dtype=torch.long)
+    mask = torch.zeros(len(batch), longest, dtype=torch.bool)
+    for position, item in enumerate(batch):
+        length = int(item["x"].shape[-1])
+        x[position, :, :length] = item["x"]
+        y[position, :length] = item["y"]
+        mask[position, :length] = item["mask"]
+    return {"x": x, "y": y, "mask": mask,
+            "row": torch.tensor([int(item["row"]) for item in batch])}
 
 
 def class_weights(manifest: pd.DataFrame, phases, power: float = 1.0,

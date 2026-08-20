@@ -234,8 +234,19 @@ A server that does not answer downgrades the run to local logging rather than ki
 | `[16,24,32,48]` / 64 | 35,932 | 737 samples, 74 s |
 
 The default sees a whole 20 s window plus margin; the deeper one is for running on a whole
-signal. Both are under 150 KB in fp32 and quantize to int8 without ceremony. Any length in, same
-length out - the input is padded to a multiple of `2 ** depth` inside `forward` and cropped back.
+signal. Both are under 150 KB in fp32 and quantize to int8 without ceremony.
+
+**Any length in, same length out**, and that holds in training as well as at inference. The input
+is padded to a multiple of `2 ** depth` inside `forward` and cropped back, so a window keeps its
+own length; `phase.dataset.collate` pads each batch to its own longest member and masks the
+padding, which the loss and the metrics already drop. Nothing is cropped to fit a tensor.
+
+`data.crop_samples` can pin a fixed length under memory pressure, but it is not the default and
+it is not free. 6.3% of windows are longer than 200 samples and they are the **hard** ones - the
+pipeline grows a window by 5 s and retries exactly when it cannot find three breaths in it, so a
+200-sample crop discards the slow and irregular breathing first. Those windows score a median
+0.68 against 0.84 for the plain 200-sample ones, so they are the part of the set worth keeping
+whole.
 
 Alternative if the device needs **causal streaming**: a dilated TCN (Bai, Kolter, Koltun, above)
 reaches the same receptive field with fewer parameters and runs off a ring buffer. It cannot see past a boundary, so a boundary is
