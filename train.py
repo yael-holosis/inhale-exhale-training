@@ -85,7 +85,8 @@ def test_figure(cfg: DictConfig, model, dataset: Path, test: pd.DataFrame,
     return figures.plot_windows(
         panels, run_dir / "test_windows.png",
         f"fold {cfg.data.split.fold} test set · {cfg.plot.pick} of {len(items)} windows",
-        "the production algorithm" if cfg.data.labels.source == "algorithm" else "a labeller")
+        "algorithm" if cfg.data.labels.source == "algorithm" else "labeller",
+        OmegaConf.to_container(cfg.plot, resolve=True))
 
 
 @hydra.main(version_base=None, config_path="parameter", config_name="config")

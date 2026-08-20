@@ -105,7 +105,7 @@ def collect(model, root: Path, frame: pd.DataFrame) -> list[dict]:
 
 
 def draw(items: list[dict], out_dir: Path, name: str, heading: str, how: str, n: int,
-         seed: int, reference_name: str) -> Path | None:
+         seed: int, reference_name: str, plot_cfg=None) -> Path | None:
     chosen = figures.choose(items, n, how, seed)
     if not chosen:
         return None
@@ -114,7 +114,8 @@ def draw(items: list[dict], out_dir: Path, name: str, heading: str, how: str, n:
                          f"{int(item['row']['RespirationWindowID'])} · "
                          f"{item['row']['env']} · macro F1 {item['score']:.2f}")}
               for item in chosen]
-    return figures.plot_windows(panels, Path(out_dir) / name, heading, reference_name)
+    return figures.plot_windows(panels, Path(out_dir) / name, heading, reference_name,
+                                plot_cfg)
 
 
 def on_fold(args, cfg) -> int:
@@ -165,7 +166,8 @@ def on_fold(args, cfg) -> int:
         path = draw(items, Path(cfg.out_dir) / "test_windows",
                     f"{Path(args.checkpoint).stem}_fold{args.fold}_{args.plot_pick}.png",
                     f"fold {args.fold} test set · {args.plot_pick} of {len(items)} windows",
-                    args.plot_pick, args.plot, cfg.seed, "the production algorithm")
+                    args.plot_pick, args.plot, cfg.seed, "algorithm",
+                    OmegaConf.to_container(cfg.plot, resolve=True))
         print(f"\n{path}")
     return 0
 

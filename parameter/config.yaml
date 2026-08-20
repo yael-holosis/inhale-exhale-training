@@ -23,6 +23,18 @@ plot:
   # Which windows: `spread` takes worst / median / best so a page shows the range rather than a
   # flattering sample of it. Also `worst`, `best`, `random`. Zero above turns figures off.
   pick: spread
+  # The model's answer is the shading behind the trace; the reference is the ribbon under it.
+  # Same values as the labelling app's `plot.phase_colors`, so a window reads the same in both
+  # places - somebody who has spent a morning labelling should not have to learn a second visual
+  # language to check what the model did. Change them here.
+  phase_colors:
+    inhale: "#4C9BE8"
+    exhale: "#E8834C"
+    stop: "#9AA0A6"
+    unknown: "#C2A878"
+  # The app's own opacity for a phase span.
+  span_alpha: 0.30
+  trace_color: "#222222"
 
 seed: 20260820
 out_dir: out

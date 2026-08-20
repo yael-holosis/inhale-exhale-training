@@ -277,6 +277,27 @@ The allowed transitions are a claim about *this label set*, not about physiology
 `inhale -> unknown -> exhale` is the normal path here and `inhale -> exhale` is not, because
 production emits no phase for the turn. **Re-derive them if the labels ever come from people.**
 
+## Looking at the test set
+
+```bash
+poetry run python evaluate.py --checkpoint <ckpt> --plot 6
+poetry run python evaluate.py --checkpoint <ckpt> --plot 4 --plot-pick worst
+```
+
+`train.py` draws one automatically at the end of every run and uploads it to ClearML as a debug
+sample, because a macro F1 does not say whether the breaths came out as breaths and nobody goes
+back to draw a page for a run that looked fine at the time.
+
+**The model's answer is the shading behind the trace; the reference is the ribbon underneath.**
+That is the labelling app's own layout, and reading it the same way in both places is worth more
+than any refinement here - somebody who has spent a morning labelling windows should not have to
+learn a second visual language to check what the model did with them. Colours are
+`plot.phase_colors` in the config, defaulting to the app's own values.
+
+`--plot-pick spread` (the default) takes the worst, the median and the best, so a page shows the
+range rather than a flattering sample of it. On a set this size a random draw is mostly median
+windows and hides both tails. Also `worst`, `best`, `random`.
+
 ## Evaluating
 
 ```bash
