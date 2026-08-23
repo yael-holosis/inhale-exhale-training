@@ -44,18 +44,11 @@ environments:
       secret_name: sm-data-science-01-db-password-edge-data-endpoint-0owgu5br
       database: edge_data_extras
     device:
-      # Production's own MySQL, through a read-only account. `edge_data_user_ro` is granted
-      # SELECT and nothing else, so production is read-only by the server's rules rather than
-      # only by ours.
+      # Production's own MySQL, through a read-only account granted SELECT and nothing else, so
+      # production is read-only by the server's rules rather than only by ours.
       #
-      # **No password is stored in this repo.** It is read from Secrets Manager in the
-      # production account, under the profile named below. Whoever has no Secrets Manager
-      # access there sets the environment variable instead - the labelling app carries the
-      # value in a tracked file for exactly that reason, and this repo deliberately does not.
-      host: rds-prod-01-mysql.ccpoaom8exlh.us-east-1.rds.amazonaws.com
-      user: edge_data_user_ro
-      password_env_var: INHALE_EXHALE_TRAINING_PROD_RO_PASSWORD
-      password_file: secrets/prod_edge_ro_password.txt
+      # Host, user and password all come out of the secret - the secret is the only credential
+      # source, and it lives in the production account, so it is read under its own profile.
       secret_name: sm-prod-01-clinical-dashboard-edge-ro
       secret_profile: holosis-prod-admin
       database: edge_data

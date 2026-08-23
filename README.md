@@ -65,16 +65,16 @@ Credentials come from Secrets Manager through `holosis_aws_manager`; a test fail
 | | `ds_algo` (SL, sleep lab) | `ds_prod` (pilots) |
 | --- | --- | --- |
 | Windows + labels | data-science MySQL, SM `sm-data-science-01-db-password-mysql-6g2w8dxe`, db `edge_data_extras` | data-science replica, SM `sm-data-science-01-db-password-edge-data-endpoint-0owgu5br` |
-| Signals + patients | same server, db `edge_data` | **production's** MySQL, user `edge_data_user_ro`, read only |
+| Signals + patients | same server, db `edge_data` | **production's** MySQL, SM `sm-prod-01-clinical-dashboard-edge-ro` under `holosis-prod-admin`, read only |
 | Window samples | \multicolumn - one bucket for both: `s3-data-science-01-holosis-health-system-sessions` | |
 
-- **Production is read-only by the server's rules**, not only by ours: `edge_data_user_ro` is
-  granted SELECT and nothing else. And `phase.sources.frame` refuses anything that is not a
-  read, so a writer added later fails in a test rather than on production.
-- **Production's password is not in this repo.** It is read from Secrets Manager in the
-  production account under `holosis-prod-admin`. Whoever has no access there sets
-  `INHALE_EXHALE_TRAINING_PROD_RO_PASSWORD`, or drops it in `secrets/` - see
-  [secrets/README.md](secrets/README.md).
+- **Production is read-only by the server's rules**, not only by ours: its account is granted
+  SELECT and nothing else. And `phase.sources.frame` refuses anything that is not a read, so a
+  writer added later fails in a test rather than on production.
+- **Secrets Manager is the only credential source.** Host, user and password all come out of the
+  secret named in the config - there is no password file and no environment variable to set.
+  Production's secret is read under `holosis-prod-admin`, so reading that side needs Secrets
+  Manager access in the production account.
 - The two sides of an environment **never join in SQL**. On prod they are different servers, so
   the window and signal frames are merged in pandas and one code path serves both instances.
 

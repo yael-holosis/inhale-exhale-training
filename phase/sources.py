@@ -1,12 +1,12 @@
 """Read the uploaded windows: the two databases, and the samples in S3.
 
 Every connection here is **read only** - this repo has no writer. Production's is read-only by
-the server's rules as well: `edge_data_user_ro` is granted SELECT and nothing else.
+the server's rules as well: production's account is granted SELECT and nothing else.
 
-Credentials come from Secrets Manager through `holosis_aws_manager`; nothing is stored in this
-repo. Production's account is the one exception people hit, because most of us have no Secrets
-Manager access there - set `INHALE_EXHALE_TRAINING_PROD_RO_PASSWORD` or drop the password in
-`secrets/prod_edge_ro_password.txt` (git-ignored) and it is used instead.
+Every credential - host, user and password alike - comes out of Secrets Manager, and nothing is
+stored in this repo or read from the environment. Production's secret lives in the production
+account, so it is read under that account's own profile while the rest of the process stays on
+the data-science one.
 
 The two sides of an environment never join in SQL. On prod they are different servers, so the
 signal and window frames are merged in pandas and the code path is the same on both instances -
@@ -29,7 +29,6 @@ import yaml
 LABELS = "labels"
 DEVICE = "device"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "parameter" / "sources" / "default.yaml"
-REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 class ReadOnly(RuntimeError):
@@ -113,25 +112,15 @@ def ensure_session(timeout_s: int = 120) -> bool:
 # ------------------------------------------------------------------------------- credentials
 
 def credentials_for(env_key: str, role: str) -> dict[str, str]:
-    """Host, user and password for one connection, from whichever source is available.
+    """Host, user and password for one connection. The secret is the only source.
 
-    In order: environment variable, local file, Secrets Manager. There is no in-repo password
-    and no code path that would use one.
+    No environment variable and no local file: a connection whose credential is not in Secrets
+    Manager is a configuration error, not something to fall back from.
     """
     cfg = env_config(env_key)[role]
-    if cfg.get("password_env_var") and os.environ.get(cfg["password_env_var"]):
-        return {"host": cfg["host"], "user": cfg["user"],
-                "password": os.environ[cfg["password_env_var"]]}
-    if cfg.get("password_file"):
-        path = REPO_ROOT / cfg["password_file"]
-        if path.exists() and path.read_text().strip():
-            return {"host": cfg["host"], "user": cfg["user"],
-                    "password": path.read_text().strip()}
-    if cfg.get("secret_name"):
-        return _from_secret(cfg["secret_name"], cfg.get("secret_profile"))
-    raise RuntimeError(
-        f"no credential for {env_key}.{role} - set {cfg.get('password_env_var')} "
-        f"or put the password in {cfg.get('password_file')}")
+    if not cfg.get("secret_name"):
+        raise RuntimeError(f"no secret_name for {env_key}.{role} in {CONFIG_PATH.name}")
+    return _from_secret(cfg["secret_name"], cfg.get("secret_profile"))
 
 
 def _from_secret(secret_name: str, secret_profile: str | None = None) -> dict[str, str]:
