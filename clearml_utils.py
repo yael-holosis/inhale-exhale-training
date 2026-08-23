@@ -103,4 +103,4 @@ def run_title(cfg: Any) -> str:
     """A name that says what the run was, so the ClearML list is readable without opening rows."""
     model = cfg.model
     return (f"{cfg.data.name}_{model.name}_d{len(model.channels)}"
-            f"_k{model.kernel_size}_fold{cfg.data.split.fold}")
+            f"_k{model.kernel_size}")

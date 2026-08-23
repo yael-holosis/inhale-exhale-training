@@ -46,7 +46,7 @@ from models.lightning_module import PhaseSegmenter
 from phase import figures, sources
 from phase.decode import decode
 from phase.labels import PHASES, UNKNOWN, spans_to_targets
-from phase.building import load_windows, resolve
+from phase.building import shard_path, load_windows, resolve
 from phase.metrics import event_level, per_sample, phase_durations
 from phase.splits import split_for
 
@@ -73,7 +73,7 @@ def predict(model: PhaseSegmenter, values: np.ndarray) -> np.ndarray:
 
 def window_samples(root: Path, row: pd.Series) -> tuple[np.ndarray, np.ndarray]:
     """The stored trace and the teacher's labels for one manifest row, from the local shard."""
-    with np.load(root / str(row["shard"]), allow_pickle=False) as stored:
+    with np.load(shard_path(root, str(row["shard"])), allow_pickle=False) as stored:
         position = int(row["position"])
         start, end = stored["offsets"][position], stored["offsets"][position + 1]
         return (stored["values"][start:end].astype(np.float32),
@@ -253,7 +253,7 @@ def main() -> int:
     root = OmegaConf.load(CONFIG_DIR / "config.yaml")
     cfg = OmegaConf.merge(root, {"data": OmegaConf.load(CONFIG_DIR / "data" /
                                                         f"{root.defaults[0]['data']}.yaml")})
-    args.fold = cfg.data.split.fold if args.fold is None else args.fold
+    args.fold = 0 if args.fold is None else args.fold
     return on_human(args, cfg) if args.human else on_fold(args, cfg)
 
 

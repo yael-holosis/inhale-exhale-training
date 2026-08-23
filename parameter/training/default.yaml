@@ -10,16 +10,16 @@ monitor_mode: max
 
 ce_weight: 1.0
 dice_weight: 1.0
-# Inverse frequency from the training split's own counts, softened and capped. Raw inverse on a
-# set that is 60-70% unknown hands the whole loss to whichever class is rarest.
+# Inverse frequency from the training split, softened and capped - a raw inverse hands the whole
+# loss to the rarest class.
 class_weight_power: 0.5
 class_weight_cap: 10.0
 
 event_iou: 0.5
 
+# No polarity flip: labels.orient_by_reviewer_flip fixes the polarity, and negating half the
+# windows would undo it. amplitude_* is a no-op under per-window z-scoring.
 augmentation:
-  # No polarity flip. `labels.orient_by_reviewer_flip` orients every window to the polarity the
-  # reviewer labelled against, and negating half of them at random would throw that away.
   time_warp_prob: 0.5
   time_warp_range: [0.8, 1.25]
   amplitude_prob: 0.5
@@ -33,11 +33,10 @@ decoding:
   viterbi: true
   enforce_min: true
   switch_penalty: 2.0
-  # Sample floors at 10 fps. A phase shorter than 0.3 s is a decoder artefact, not a breath.
+  # Samples at 10 fps. Anything shorter is a decoder artefact, not a breath.
   min_duration: {unknown: 1, inhale: 3, exhale: 3, stop: 2}
-  # A claim about THIS label set, not about physiology. Production emits no phase for the turn
-  # from inhale to exhale, so `inhale -> unknown -> exhale` is the normal path here and
-  # `inhale -> exhale` is not. Re-derive this if the labels ever come from people instead.
+  # Describes THIS label set, not physiology: production emits no phase at the turn, so
+  # inhale -> unknown -> exhale is normal and inhale -> exhale does not occur.
   allowed:
     unknown: [inhale, exhale, stop]
     inhale:  [unknown]

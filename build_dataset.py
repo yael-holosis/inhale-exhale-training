@@ -34,6 +34,9 @@ Options
 
 `--patients PREFIX [...]`   Match the display name (`SL0066`, `SL`) or the patient key (`bs-`).
 
+`--exclude PREFIX [...]`   Drop these patients even if `--patients` would have taken them.
+    Defaults to `data.exclude_patients`, which holds the QA rig.
+
 `--signals ID [...]`   Exactly these radar signals, no sampling.
 
 `--per-patient N`   Cap the signals one patient contributes, sampled seeded and spread across
@@ -88,6 +91,8 @@ def parse_args(cfg):
     parser.add_argument("--labels", choices=list(SOURCES), default=None,
                         help=f"override data.labels.source (default {cfg.data.labels.source})")
     parser.add_argument("--patients", nargs="*", default=None, metavar="PREFIX")
+    parser.add_argument("--exclude", nargs="*", default=None, metavar="PREFIX",
+                        help="patient prefixes to drop (default data.exclude_patients)")
     parser.add_argument("--signals", nargs="*", type=int, default=None, metavar="ID")
     parser.add_argument("--per-patient", type=int, default=cfg.data.signals_per_patient)
     parser.add_argument("--seed", type=int, default=cfg.data.sample_seed)
@@ -144,7 +149,10 @@ def main() -> int:
     source = LabelSource(args.env[0], label_cfg).source
     out_dir = target_directory(args, cfg, source)
     patients = args.patients if args.patients is not None else list(cfg.data.patients or [])
-    print(f"env {', '.join(args.env)} | labels {source} | patients {patients or 'all'} "
+    excluded = (args.exclude if args.exclude is not None
+                else list(cfg.data.get("exclude_patients") or []))
+    print(f"env {', '.join(args.env)} | labels {source} | patients {patients or 'all'}"
+          f"{' | excluding ' + ', '.join(excluded) if excluded else ''} "
           f"| per-patient {args.per_patient or 'all'}\n-> {out_dir}")
 
     frame, built, failed = None, 0, 0
@@ -154,13 +162,15 @@ def main() -> int:
         print(f"\n[{env_key}]")
         frame, stats = build(env_key=env_key, out_dir=out_dir, labels=labels,
                              patients=patients or None, signals=args.signals,
-                             per_patient=args.per_patient, seed=args.seed, limit=args.limit)
+                             per_patient=args.per_patient, seed=args.seed, limit=args.limit,
+                             exclude_patients=excluded or None)
         built, failed = built + stats.signals_built, failed + stats.signals_failed
         if frame.empty:
             continue
         # One entry per instance, so a directory records every invocation that filled it.
         write_provenance(out_dir, {
             "started": started, "finished": stamp(), "env": env_key, "patients": patients,
+            "exclude_patients": excluded,
             "per_patient": args.per_patient, "signals": args.signals, "sample_seed": args.seed,
             "limit": args.limit, "labels": labels.describe(),
             "signals_planned": stats.signals_planned, "signals_built": stats.signals_built,

@@ -222,3 +222,18 @@ def test_drift_stays_under_the_breathing_it_is_meant_to_sit_beneath():
     added = drifted - values
     assert added.std() < values.std(), (
         f"drift {added.std():.2e} must sit under the signal {values.std():.2e}")
+
+
+def test_shards_are_read_from_the_subdirectory_and_from_the_old_flat_layout(tmp_path):
+    """A dataset built before the shards moved must still load - `shard_path` decides, not the
+    caller, so nothing has to know which layout it is looking at."""
+    from phase.building import SHARDS_DIR, shard_path
+
+    (tmp_path / SHARDS_DIR).mkdir()
+    (tmp_path / SHARDS_DIR / "nested.npz").write_bytes(b"")
+    (tmp_path / "flat.npz").write_bytes(b"")
+
+    assert shard_path(tmp_path, "nested.npz") == tmp_path / SHARDS_DIR / "nested.npz"
+    assert shard_path(tmp_path, "flat.npz") == tmp_path / "flat.npz"
+    # Absent either way, the subdirectory is not silently preferred into a missing file.
+    assert shard_path(tmp_path, "gone.npz") == tmp_path / "gone.npz"

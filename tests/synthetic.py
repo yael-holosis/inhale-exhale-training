@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 
 from phase.labels import EXHALE, INHALE, STOP, UNKNOWN, class_counts
-from phase.building import SHARD_TEMPLATE, write_windows
+from phase.building import SHARD_TEMPLATE, SHARDS_DIR, write_windows
 from phase.labels import PHASES
 
 ENV = "synthetic"
@@ -78,8 +78,9 @@ def build(root: Path, n_patients: int = 8, signals_per_patient: int = 3,
             lengths = np.array([v.size for v in values], dtype=np.int64)
             offsets = np.concatenate(([0], np.cumsum(lengths)))
             shard = SHARD_TEMPLATE.format(env=env, signal_id=signal_id)
+            (root / SHARDS_DIR).mkdir(parents=True, exist_ok=True)
             np.savez_compressed(
-                root / shard,
+                root / SHARDS_DIR / shard,
                 values=np.concatenate(values).astype(np.float32),
                 targets=np.concatenate(targets).astype(np.int8),
                 offsets=offsets,

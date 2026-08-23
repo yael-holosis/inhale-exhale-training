@@ -42,6 +42,11 @@ WINDOWS_NAME = "windows.csv"
 PARAMS_NAME = "build_params.yaml"
 STATS_NAME = "stats.yaml"
 SHARD_TEMPLATE = "{env}_signal_{signal_id}.npz"
+SHARDS_DIR = "shards"
+"""The shards live in their own subdirectory, so the dataset directory itself stays
+readable - `build_params.yaml`, `windows.csv` and `stats.yaml` were being buried under a
+hundred blobs. `shard_path` resolves the flat layout too, so datasets built before this
+still load."""
 """Environment first, and it has to be. `ds_algo` and `ds_prod` have unrelated `RadarSignal` ID
 spaces - signal 2120091 is a different recording on each - so one filename would silently
 overwrite the other's samples."""
@@ -125,12 +130,21 @@ def catalogue(env_key: str) -> pd.DataFrame:
 
 def select(frame: pd.DataFrame, patients: list[str] | None = None,
            signals: list[int] | None = None, per_patient: int | None = None,
-           seed: int = 0) -> pd.DataFrame:
-    """Narrow the catalogue. Signal-level, because a shard is a signal."""
+           seed: int = 0, exclude_patients: list[str] | None = None) -> pd.DataFrame:
+    """Narrow the catalogue. Signal-level, because a shard is a signal.
+
+    `exclude_patients` is applied after `patients` and wins over it: a prefix that is wanted and
+    excluded is excluded, which is what makes it usable to drop a QA rig out of an otherwise
+    unfiltered build.
+    """
     if patients:
         wanted = tuple(patients)
         frame = frame[frame["Patient"].astype(str).str.startswith(wanted)
                       | frame["PatientKey"].astype(str).str.startswith(wanted)]
+    if exclude_patients:
+        unwanted = tuple(exclude_patients)
+        frame = frame[~(frame["Patient"].astype(str).str.startswith(unwanted)
+                        | frame["PatientKey"].astype(str).str.startswith(unwanted))]
     if signals:
         frame = frame[frame["RadarSignalID"].isin([int(value) for value in signals])]
     if not per_patient:
@@ -155,6 +169,13 @@ def select(frame: pd.DataFrame, patients: list[str] | None = None,
                     chosen.append(sessions[session].pop())
         taken.append(rows[rows["RadarSignalID"].isin(chosen)])
     return pd.concat(taken) if taken else frame.iloc[0:0]
+
+
+def shard_path(root: str | Path, shard: str) -> Path:
+    """Where a shard is, subdirectory first and the old flat layout second."""
+    root = Path(root)
+    nested = root / SHARDS_DIR / shard
+    return nested if nested.exists() else root / shard
 
 
 def _patient_seed(seed: int, patient: str) -> int:
@@ -241,16 +262,19 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
 
 def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] | None = None,
           signals: list[int] | None = None, per_patient: int | None = None, seed: int = 0,
-          limit: int | None = None, log=print) -> tuple[pd.DataFrame, BuildStats]:
+          limit: int | None = None, log=print,
+          exclude_patients: list[str] | None = None) -> tuple[pd.DataFrame, BuildStats]:
     """Read the selected signals' windows and write one shard each.
 
     Resumable: a shard already on disk is left alone. A window blob is immutable once uploaded,
     so a shard can never be stale - only absent.
     """
     out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    shards_dir = out_dir / SHARDS_DIR
+    shards_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen = labels.eligible(select(catalogue(env_key), patients, signals, per_patient, seed))
+    chosen = labels.eligible(select(catalogue(env_key), patients, signals,
+                                    per_patient, seed, exclude_patients))
     if chosen.empty:
         log(f"no window on {env_key} matches that selection and can be labelled by "
             f"`{labels.source}`")
@@ -267,7 +291,7 @@ def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] 
     for count, (_, row) in enumerate(by_signal.iterrows(), start=1):
         signal_id = int(row["RadarSignalID"])
         shard = SHARD_TEMPLATE.format(env=env_key, signal_id=signal_id)
-        if (out_dir / shard).exists():
+        if shard_path(out_dir, shard).exists():
             stats.signals_built += 1
             continue
         try:
@@ -282,7 +306,7 @@ def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] 
             stats.failures.append(f"{signal_id}: no window carried samples")
             continue
 
-        np.savez_compressed(out_dir / shard,
+        np.savez_compressed(shards_dir / shard,
                             **_shard_arrays(env_key, signal_id, str(row["Patient"]),
                                             str(row["PatientKey"]), int(row["SessionID"]),
                                             windows))
@@ -325,7 +349,10 @@ def read_windows(out_dir: Path) -> pd.DataFrame:
     """
     out_dir = Path(out_dir)
     rows: list[dict[str, Any]] = []
-    for path in sorted(out_dir.glob("*_signal_*.npz")):
+    # Both layouts, so a dataset built before the shards moved still rebuilds its index.
+    found = sorted(out_dir.glob(f"{SHARDS_DIR}/*_signal_*.npz")) or \
+        sorted(out_dir.glob("*_signal_*.npz"))
+    for path in found:
         with np.load(path, allow_pickle=False) as stored:
             rows.extend(_rows_of_shard(stored, path.name))
     frame = pd.DataFrame(rows)

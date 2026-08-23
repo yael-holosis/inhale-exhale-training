@@ -35,6 +35,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
 
+from phase.building import shard_path
 from phase.labels import UNKNOWN
 
 
@@ -71,7 +72,7 @@ class WindowDataset(Dataset):
 
     def _shard(self, name: str) -> dict[str, np.ndarray]:
         if name not in self._cache:
-            with np.load(self.root / name, allow_pickle=False) as stored:
+            with np.load(shard_path(self.root, name), allow_pickle=False) as stored:
                 self._cache[name] = {"values": stored["values"], "targets": stored["targets"],
                                      "offsets": stored["offsets"]}
         return self._cache[name]

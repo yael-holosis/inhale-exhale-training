@@ -1,94 +1,50 @@
-# The dataset: one respiration window per row, one class per sample.
-#
-# Windows are read from `RespirationWindow` and S3 - **no raw scan is downloaded**, the pipeline
-# already ran when they were uploaded. What differs between datasets is where the *labels* come
-# from; see `labels.source` below.
+# One respiration window per row, one class per sample.
 name: phases
 
-# The dataset directory to train on. Each build writes a new timestamped one, so this names a
-# specific dataset rather than a moving target - a run is reproducible from the directory alone.
-# `latest` resolves to the newest build under `root`.
 root: data_sets
+# `latest` is the newest build under root.
 dir: latest
 
-# Which instances. `ds_algo` is the data-science cohort - the SL sleep-lab nights; `ds_prod` is
-# the pilots. All of them go into one dataset directory, because the split stratifies on `env`.
-# Nothing is ever written to production.
 env: [ds_algo, ds_prod]
-# Patient prefixes, matching the display name (SL0066) or the patient key (algo-p089, bs-).
-# Null is every patient with uploaded windows.
+# Prefixes matching the display name (SL0066) or the patient key (bs-). Null takes everyone.
 patients: null
-# Cap on signals per patient, sampled seeded and spread across sessions. Null takes everything
-# uploaded - the right setting while the uploaded pool is this small.
+# Dropped even if `patients` would take them. SL_QA is the QA rig, not a person.
+exclude_patients: [SL_QA]
 signals_per_patient: null
 sample_seed: 20260819
 
 labels:
-  # Where the per-sample target comes from. The two are different datasets and are never mixed
-  # in one directory - the build records which was used and refuses to extend a directory built
-  # the other way.
-  #
-  #   algorithm - production's own `calculate_inhale_exhale_time`, re-run on the stored window.
-  #               Available for every window, so this is what there is enough of to train on.
-  #               It is distillation: the ceiling is the current algorithm, and its boundaries
-  #               are 10-90% amplitude crossings rather than phase durations.
-  #
-  #   human     - `BreathPhaseTimeRecord`, the spans a person actually drew. The real target,
-  #               and the only thing that measures correctness - but only a few dozen windows
-  #               carry one today, which is why the first runs use `algorithm`.
+  # algorithm - production's own phase call, re-run. Every window, but imitation not truth.
+  # human     - the spans a person drew. Fewer windows, the only measure of correctness.
+  # A directory holds one source; the build refuses to mix them.
   source: algorithm
 
-  # `human` only. Null takes every labelled window; an id takes one person's work alone, which
-  # is what an inter-labeller comparison needs.
+  # human only. Null takes every labeller; an id takes one person alone.
   labeler_id: null
-  # `human` only, and only where two people have labelled the same window: whose reading wins.
-  #   latest    - the most recent, by RecordCreationTime
-  #   lowest_id - the first labeller by id, so the choice does not move as people re-save
+  # human only, where two people labelled one window: latest | lowest_id.
   on_conflict: latest
-
-  # Negate the waveform where the reviewer set `ReviewerFlipped`, so the trace matches the
-  # orientation they labelled against. Amplitude only - span indices are unaffected.
+  # Negate the waveform where ReviewerFlipped is set. Amplitude only, indices unaffected.
   orient_by_reviewer_flip: true
-
-  # A window with no stored rate gives the detector nothing to run at - it filters at roughly
-  # twice the rate - so it carries no algorithm phases. Kept and labelled entirely unknown:
-  # "the algorithm found nothing here" is a training signal, and dropping those windows would
-  # bias the set towards easy breathing. `human` ignores this - a person needs no rate.
+  # No stored rate means no algorithm phases. Kept, labelled unknown - dropping them would bias
+  # the set towards easy breathing. human ignores this.
   requires_rate: true
 
-# How the data is cut. Nothing about this is decided in code - see phase/splits.py. Written into
-# the dataset directory by `make_splits.py`, not recomputed at train time, so the record of which
-# window went where survives the run.
+# Written into the dataset by make_splits.py, never recomputed at train time.
 split:
-  # Held out once, by patient, and never trained on in any fold. Every fold therefore reports
-  # against the same test set, which is what makes fold numbers comparable.
   test_fraction: 0.2
-  # Folds rotate the validation set inside the remaining patients.
+  # make_splits.py cuts this many; train.py trains this many and aggregates them.
   folds: 5
-  fold: 0
   seed: 20260820
-  # The unit a split may not cut through. `PatientID` is a display name and the two instances
-  # have unrelated identity spaces, so the environment is part of the identity: without it, two
-  # different people sharing a name would merge into one group and land on both sides.
+  # A split may not cut through these. env is part of the identity - the instances have
+  # unrelated name spaces, so without it two people sharing a name would merge.
   group_columns: [env, PatientID]
-  # A composite key, one value per group, balanced across test and across folds. `env` is the
-  # cohort: the instances differ in acquisition (ds_algo is roughly half 300 fps two-antenna,
-  # ds_prod entirely 200 fps), so a split that ignores it puts folds on different populations.
-  # Empty list disables stratification.
+  # Balanced across test and folds. Empty disables stratification.
   stratify_cols: [env]
 
-# Null keeps every window at its own length: the network is fully convolutional, and the only
-# thing that ever wanted a common length is the tensor a batch is stacked into - which `collate`
-# handles by padding to the batch's own longest member and masking the padding.
-#
-# Set a number only under memory pressure, and knowing the cost: 6.3% of windows are longer than
-# 200 samples and they are the *hard* ones - the pipeline grows a window by 5 s and retries
-# exactly when it cannot find three breaths in it, so a 200-sample crop throws away the slow and
-# irregular breathing first. Measured on the built set it discards 2.9% of samples, all of them
-# from that 6.3%.
+# Null keeps each window its own length - the net is fully convolutional and collate pads per
+# batch. A crop drops the long windows, which are the hard ones.
 crop_samples: null
-# 'window' z-scores each item on its own statistics - what the device can do at inference, since
-# it has no corpus statistics to hand.
+# Per-window z-score: what the device can do at inference, having no corpus statistics.
 normalise: window
 
 batch_size: 64

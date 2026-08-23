@@ -30,6 +30,7 @@ import numpy as np
 
 from phase.labels import PHASES, UNKNOWN, targets_to_spans
 from phase.metrics import per_sample
+from phase.splits import FOLD_COLUMN, SPLIT_COLUMN, TEST, TRAIN, VAL
 
 SURFACE = "#ffffff"
 INK = "#0b0b0b"
@@ -42,6 +43,10 @@ DEFAULT_COLORS = {"inhale": "#4C9BE8", "exhale": "#E8834C",
 
 DEFAULT_SPAN_ALPHA = 0.30
 DEFAULT_TRACE = "#222222"
+
+DEFAULT_SPLIT_COLORS = {TRAIN: "#3E7CB1", VAL: "#E8A34C", TEST: "#B5544A"}
+"""Splits are not phases and must not borrow their palette - a reader should never have to
+ask whether a blue bar means `inhale` or `train`. Overridden by `plot.split_colors`."""
 
 RIBBON_HEIGHT = 0.16
 RIBBON_TOP = -0.20
@@ -178,3 +183,189 @@ def choose(scored: list[dict[str, Any]], n: int, how: str = SPREAD,
 def score(prediction: np.ndarray, reference: np.ndarray) -> float:
     """Macro F1 over the called classes - the number the panel title carries."""
     return float(per_sample(prediction, reference)["macro_f1"])
+
+
+# ------------------------------------------------------------------------------------- splits
+
+SPLIT_ORDER = (TRAIN, VAL, TEST)
+
+
+def split_colors_of(cfg: Mapping[str, Any] | None) -> dict[str, str]:
+    chosen = {**DEFAULT_SPLIT_COLORS, **dict((cfg or {}).get("split_colors", {}) or {})}
+    missing = [name for name in SPLIT_ORDER if name not in chosen]
+    if missing:
+        raise KeyError(f"plot.split_colors has no colour for {missing}")
+    return chosen
+
+
+def split_summary(manifest, fold: int, out_path: str | Path,
+                  plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """Where every window went, per patient, for one fold.
+
+    Per patient rather than per split total, because the split is *by patient* - a total says
+    the proportions came out right while hiding that one person carries a third of the test set.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    colors = split_colors_of(dict(plot_cfg or {}))
+    column = FOLD_COLUMN.format(fold=fold)
+    if column not in manifest.columns:
+        raise KeyError(f"{column} not in the manifest - run make_splits.py first")
+
+    counts = (manifest.groupby(["env", "PatientID", column]).size().unstack(fill_value=0)
+              .reindex(columns=list(SPLIT_ORDER), fill_value=0))
+    # Ordered by which split a patient belongs to, then by size: patients land wholly in one
+    # split, so grouping them makes the by-patient rule visible instead of implied.
+    counts["_where"] = [SPLIT_ORDER.index(row.idxmax()) for _, row in counts.iterrows()]
+    counts = counts.sort_values(["_where", "env"]).drop(columns="_where")
+
+    labels = [f"{patient}  ({env.replace('ds_', '')})" for env, patient in counts.index]
+    totals = manifest[column].value_counts()
+    windows = len(manifest)
+
+    height = 0.26 * len(counts) + 1.9
+    fig, (ax, bar) = plt.subplots(
+        2, 1, figsize=(10, height), facecolor=SURFACE,
+        gridspec_kw={"height_ratios": [0.26 * len(counts), 0.62], "hspace": 0.30})
+
+    left = np.zeros(len(counts))
+    for split in SPLIT_ORDER:
+        values = counts[split].to_numpy()
+        ax.barh(labels, values, left=left, color=colors[split], label=split,
+                height=0.74, linewidth=0)
+        left += values
+    for y, total in enumerate(left):
+        ax.text(total + windows * 0.004, y, f"{int(total)}", va="center", fontsize=7.5,
+                color=INK_SOFT)
+    ax.set_xlim(0, left.max() * 1.10)
+    ax.invert_yaxis()
+    ax.set_xlabel("windows", fontsize=8, color=INK_SOFT)
+    ax.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+    ax.grid(axis="x", color=GRID, linewidth=0.6)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.set_title(f"{len(counts)} patients, one split each", fontsize=8.5, color=INK,
+                 loc="left", pad=6)
+
+    start = 0.0
+    for split in SPLIT_ORDER:
+        n = int(totals.get(split, 0))
+        if not n:
+            continue
+        bar.barh([0], [n], left=[start], color=colors[split], height=0.62, linewidth=0)
+        share = 100 * n / windows
+        bar.text(start + n / 2, 0, f"{split}\n{n}  ({share:.0f}%)", ha="center", va="center",
+                 fontsize=8, color=SURFACE, fontweight="bold")
+        start += n
+    bar.set_xlim(0, windows)
+    bar.set_ylim(-0.5, 0.5)
+    bar.axis("off")
+    bar.set_title(f"fold {fold}: {windows} windows, "
+                  f"{manifest['RadarSignalID'].nunique()} signals, "
+                  f"{manifest.groupby(['env', 'PatientID']).ngroups} patients",
+                  fontsize=8.5, color=INK, loc="left", pad=4)
+
+    fig.suptitle("who went where", fontsize=10.5, color=INK, x=0.012, ha="left", y=0.998)
+    fig.text(0.988, 0.998, "grouped by patient - no patient is split across two parts",
+             ha="right", va="top", fontsize=8, color=INK_SOFT)
+    # `bar.axis("off")` is not tight_layout-compatible, so the margins are set directly.
+    fig.subplots_adjust(left=0.19, right=0.97, top=1 - 0.55 / height, bottom=0.42 / height)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+# ------------------------------------------------------------------------------ fold report
+
+def fold_report(per_fold, ensemble: Mapping[str, float], interval: tuple[float, float],
+                matrix: np.ndarray, out_path: str | Path,
+                plot_cfg: Mapping[str, Any] | None = None,
+                headline: str = "macro_f1") -> Path:
+    """Per-fold scores, the ensemble against them, and where the ensemble confuses classes.
+
+    The fold dots and the ensemble line are drawn together on purpose: the ensemble is the number
+    to quote, and seeing it beside the five it came from is what stops it being read as five
+    models agreeing when they did not.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    colors = colors_of(dict(plot_cfg or {}))
+    splits = split_colors_of(dict(plot_cfg or {}))
+
+    fig, (dots, per_class, heat) = plt.subplots(
+        1, 3, figsize=(13, 4.0), facecolor=SURFACE,
+        gridspec_kw={"width_ratios": [1.0, 1.25, 1.15], "wspace": 0.30})
+
+    # ------------------------------------------------------------------ fold spread
+    scores = per_fold[headline].to_numpy() if headline in per_fold else np.array([])
+    if scores.size:
+        x = np.arange(scores.size)
+        dots.scatter(x, scores, s=52, color=splits[TRAIN], zorder=3, label="fold")
+        low, high = interval
+        dots.axhspan(low, high, color=splits[TEST], alpha=0.13, zorder=0,
+                     label="ensemble 95% CI")
+        dots.axhline(ensemble[headline], color=splits[TEST], linewidth=1.8, zorder=2,
+                     label="ensemble")
+        dots.set_xticks(x)
+        dots.set_xticklabels([name.replace("fold_", "") for name in per_fold.index],
+                            fontsize=7.5)
+        dots.set_xlim(-0.6, scores.size - 0.4)
+        dots.set_ylim(0, 1)
+        dots.set_xlabel("fold", fontsize=8, color=INK_SOFT)
+        dots.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="lower right")
+    dots.set_title(headline.replace("_", " "), fontsize=8.5, color=INK, loc="left", pad=6)
+    dots.grid(axis="y", color=GRID, linewidth=0.6)
+    dots.set_axisbelow(True)
+    dots.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+    for side in ("top", "right", "left"):
+        dots.spines[side].set_visible(False)
+    dots.spines["bottom"].set_color(GRID)
+
+    # ------------------------------------------------------------------ per class
+    width = 0.38
+    y = np.arange(len(PHASES))
+    for offset, kind in ((-width / 2, "f1"), (width / 2, "event_f1")):
+        values = [ensemble.get(f"{kind}_{name}", np.nan) for name in PHASES]
+        per_class.barh(y + offset, values, height=width, linewidth=0,
+                       color=[colors[name] for name in PHASES],
+                       alpha=1.0 if kind == "f1" else 0.45,
+                       label="per sample" if kind == "f1" else "per event")
+    per_class.set_yticks(y)
+    per_class.set_yticklabels(PHASES, fontsize=7.5)
+    per_class.invert_yaxis()
+    per_class.set_xlim(0, 1)
+    per_class.set_xlabel("F1", fontsize=8, color=INK_SOFT)
+    per_class.set_title("ensemble, by class", fontsize=8.5, color=INK, loc="left", pad=6)
+    per_class.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="lower right")
+    per_class.grid(axis="x", color=GRID, linewidth=0.6)
+    per_class.set_axisbelow(True)
+    per_class.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+    for side in ("top", "right", "left"):
+        per_class.spines[side].set_visible(False)
+    per_class.spines["bottom"].set_color(GRID)
+
+    # ------------------------------------------------------------------ confusion
+    heat.imshow(matrix, cmap="Blues", vmin=0, vmax=1)
+    heat.set_xticks(range(len(PHASES)), PHASES, fontsize=7, rotation=35, ha="right")
+    heat.set_yticks(range(len(PHASES)), PHASES, fontsize=7)
+    heat.set_xlabel("predicted", fontsize=8, color=INK_SOFT)
+    heat.set_ylabel("labelled", fontsize=8, color=INK_SOFT)
+    heat.set_title("row-normalised confusion", fontsize=8.5, color=INK, loc="left", pad=6)
+    for i in range(len(PHASES)):
+        for j in range(len(PHASES)):
+            heat.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=7,
+                      color=SURFACE if matrix[i, j] > 0.55 else INK)
+    heat.tick_params(colors=INK_SOFT, length=0)
+    for spine in heat.spines.values():
+        spine.set_visible(False)
+
+    fig.suptitle("test set - five folds and their ensemble", fontsize=10.5, color=INK,
+                 x=0.008, ha="left", y=0.995)
+    fig.text(0.992, 0.995, "one held-out test set, shared by every fold", ha="right", va="top",
+             fontsize=8, color=INK_SOFT)
+    fig.subplots_adjust(left=0.055, right=0.985, top=0.855, bottom=0.135)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path

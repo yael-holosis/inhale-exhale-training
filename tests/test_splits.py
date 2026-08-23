@@ -158,3 +158,19 @@ def test_a_different_seed_moves_it(frame):
 def test_stratification_can_be_turned_off(frame):
     out = make_splits(frame, {**CONFIG, "stratify_cols": []})
     assert set(out[SPLIT_COLUMN]) == {"train", "test"}
+
+
+def test_excluding_a_patient_drops_it_even_when_patients_would_have_taken_it():
+    """`SL_QA` is a QA rig. Excluding has to win over selecting, or an unfiltered build keeps it."""
+    from phase.building import select
+
+    frame = pd.DataFrame({"Patient": ["SL0001", "SL_QA", "SL0002"],
+                          "PatientKey": ["a", "qa", "b"],
+                          "RadarSignalID": [1, 2, 3], "SessionID": [1, 2, 3]})
+
+    assert set(select(frame, exclude_patients=["SL_QA"])["Patient"]) == {"SL0001", "SL0002"}
+    # Wanted and excluded at once - excluded wins.
+    assert select(frame, patients=["SL_"], exclude_patients=["SL_QA"]).empty
+    assert set(select(frame, patients=["SL"], exclude_patients=["SL_QA"])["Patient"]) == \
+        {"SL0001", "SL0002"}
+    assert len(select(frame)) == 3

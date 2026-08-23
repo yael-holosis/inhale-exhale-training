@@ -1,38 +1,33 @@
-# Hydra root. Everything a run depends on is here or in the groups below - no literals in code.
 defaults:
   - data: phases
   - model: unet1d
   - training: default
   - _self_
 
-# `parameter/sources/default.yaml` holds the databases, the bucket and the table names. It is
-# read directly by `phase.sources` rather than composed here, because the dataset build is not a
-# Hydra job and must not need the launcher to open a connection.
+# Databases, bucket and tables are in parameter/sources/default.yaml, read directly by
+# phase.sources - the dataset build is not a Hydra job.
 
 clearml:
-  # The designated project. Credentials come from ~/clearml.conf, exactly as in `cough` -
-  # nothing is written down in this repo, and DISABLE_CLEARML=true turns logging off entirely.
   project_name: inhale-exhale-phase
   enabled: true
   timeout_s: 10
 
-# Figures drawn beside the metrics. A macro F1 does not say whether the breaths came out as
-# breaths, and nobody goes back to draw a page for a run that looked fine at the time.
 plot:
+  # 0 turns figures off.
   windows: 6
-  # Which windows: `spread` takes worst / median / best so a page shows the range rather than a
-  # flattering sample of it. Also `worst`, `best`, `random`. Zero above turns figures off.
+  # spread | worst | best | random. spread takes worst/median/best.
   pick: spread
-  # The model's answer is the shading behind the trace; the reference is the ribbon under it.
-  # Same values as the labelling app's `plot.phase_colors`, so a window reads the same in both
-  # places - somebody who has spent a morning labelling should not have to learn a second visual
-  # language to check what the model did. Change them here.
+  # The labelling app's own values, so a window reads the same in both places.
   phase_colors:
     inhale: "#4C9BE8"
     exhale: "#E8834C"
     stop: "#9AA0A6"
     unknown: "#C2A878"
-  # The app's own opacity for a phase span.
+  # Splits are not phases and must not share their palette.
+  split_colors:
+    train: "#3E7CB1"
+    val: "#E8A34C"
+    test: "#B5544A"
   span_alpha: 0.30
   trace_color: "#222222"
 

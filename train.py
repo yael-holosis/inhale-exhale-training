@@ -29,11 +29,15 @@ from torch.utils.data import DataLoader
 from clearml_utils import initialize_clearml_task, run_title
 from models.lightning_module import PhaseSegmenter
 from phase import figures
-from phase.building import load_windows, resolve
+from phase.building import shard_path, load_windows, resolve
 from phase.decode import decode
 from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
 from phase.labels import PHASES
 from phase.splits import SPLIT_COLUMN, describe, split_for
+from report_folds import aggregate
+
+TEST_LOGITS_NAME = "test_logits.npz"
+FOLD_DIR = "fold_{fold}"
 
 
 def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
@@ -59,15 +63,16 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
     return out
 
 
-def test_figure(cfg: DictConfig, model, dataset: Path, test: pd.DataFrame,
-                run_dir: Path) -> Path | None:
-    """Draw a spread of test windows - worst, median, best - beside the metrics."""
-    if not cfg.plot.windows:
-        return None
+def test_predictions(model, dataset: Path, test: pd.DataFrame) -> list[dict]:
+    """One window at a time, so no padding reaches the net and the logits are the window's own.
+
+    The logits are kept, not just the decoded labels: aggregating folds means averaging logits
+    before the decoder runs, and a decoded label cannot be averaged back into one.
+    """
     model.eval()
     items = []
     for _, row in test.iterrows():
-        with np.load(dataset / str(row["shard"]), allow_pickle=False) as stored:
+        with np.load(shard_path(dataset, str(row["shard"])), allow_pickle=False) as stored:
             position = int(row["position"])
             start, end = stored["offsets"][position], stored["offsets"][position + 1]
             values = stored["values"][start:end].astype(np.float32)
@@ -77,12 +82,36 @@ def test_figure(cfg: DictConfig, model, dataset: Path, test: pd.DataFrame,
         normalised = centred / scale if scale > 1e-8 else centred
         with torch.no_grad():
             logits = model(torch.from_numpy(normalised[None, None, :]))
-        prediction = decode(logits[0].permute(1, 0).cpu().numpy(), model.cost,
-                            model.min_duration)
+        logits = logits[0].permute(1, 0).cpu().numpy()
+        prediction = decode(logits, model.cost, model.min_duration)
         items.append({"values": values, "reference": reference, "prediction": prediction,
-                      "fps": float(row["analysis_fps"]), "row": row,
+                      "logits": logits, "fps": float(row["analysis_fps"]), "row": row,
                       "score": figures.score(prediction, reference)})
+    return items
 
+
+def save_test_logits(items: list[dict], run_dir: Path) -> Path:
+    """Per-sample logits on the test set, ragged like a shard - `report_folds.py` reads these."""
+    lengths = np.array([item["logits"].shape[0] for item in items], dtype=np.int64)
+    out = run_dir / TEST_LOGITS_NAME
+    np.savez_compressed(
+        out,
+        logits=np.concatenate([item["logits"] for item in items]).astype(np.float32),
+        targets=np.concatenate([item["reference"] for item in items]).astype(np.int8),
+        offsets=np.concatenate(([0], np.cumsum(lengths))).astype(np.int64),
+        window_id=np.array([int(item["row"]["RespirationWindowID"]) for item in items],
+                           dtype=np.int64),
+        patient=np.array([str(item["row"]["PatientID"]) for item in items]),
+        env=np.array([str(item["row"]["env"]) for item in items]),
+        fps=np.array([item["fps"] for item in items], dtype=np.float32))
+    return out
+
+
+def test_figure(cfg: DictConfig, items: list[dict], run_dir: Path,
+                fold: int) -> Path | None:
+    """Draw a spread of test windows - worst, median, best - beside the metrics."""
+    if not cfg.plot.windows or not items:
+        return None
     chosen = figures.choose(items, cfg.plot.windows, cfg.plot.pick, cfg.seed)
     if not chosen:
         return None
@@ -92,27 +121,22 @@ def test_figure(cfg: DictConfig, model, dataset: Path, test: pd.DataFrame,
               for item in chosen]
     return figures.plot_windows(
         panels, run_dir / "test_windows.png",
-        f"fold {cfg.data.split.fold} test set · {cfg.plot.pick} of {len(items)} windows",
+        f"fold {fold} test set · {cfg.plot.pick} of {len(items)} windows",
         "algorithm" if cfg.data.labels.source == "algorithm" else "labeller",
         OmegaConf.to_container(cfg.plot, resolve=True))
 
 
-@hydra.main(version_base=None, config_path="parameter", config_name="config")
-def main(cfg: DictConfig) -> None:
-    pl.seed_everything(cfg.seed + cfg.data.split.fold, workers=True)
-    run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
-
-    dataset = resolve(cfg.data.root, cfg.data.dir, cfg.data.labels.source)
-    manifest = load_windows(dataset)
+def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
+             run_dir: Path) -> dict:
+    """Train one fold and test it. Returns that fold's test metrics."""
+    pl.seed_everything(cfg.seed + fold, workers=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
     cut = cfg.data.split
-    if SPLIT_COLUMN not in manifest.columns:
-        raise KeyError(f"{dataset} carries no splits - run: "
-                       f"poetry run python make_splits.py --dataset {dataset}")
 
     # Read off the columns, never recomputed here: the split that trained a model has to be the
     # one recorded beside the data, not whatever the config happens to say at run time.
-    splits = split_for(manifest, cut.fold)
-    print(f"dataset {dataset}\nfold {cut.fold} of {cut.folds}, test held out of every fold\n"
+    splits = split_for(manifest, fold)
+    print(f"dataset {dataset}\nfold {fold} of {cut.folds}, test held out of every fold\n"
           + describe(splits, total=len(manifest), stratify_cols=cut.stratify_cols))
 
     weights = class_weights(splits["train"], PHASES, power=cfg.training.class_weight_power,
@@ -131,8 +155,8 @@ def main(cfg: DictConfig) -> None:
     task = None
     if cfg.clearml.enabled:
         task = initialize_clearml_task(project_name=cfg.clearml.project_name,
-                                       task_name=run_title(cfg), timeout=cfg.clearml.timeout_s,
-                                       cfg=cfg)
+                                       task_name=f"{run_title(cfg)} fold {fold}",
+                                       timeout=cfg.clearml.timeout_s, cfg=cfg)
 
     data = loaders(cfg, splits, dataset)
     checkpoint = ModelCheckpoint(dirpath=run_dir / "checkpoints", monitor=cfg.training.monitor,
@@ -158,13 +182,15 @@ def main(cfg: DictConfig) -> None:
     # The dataset that produced these numbers, named beside them - a run directory that only says
     # "fold 0" cannot be traced back to what it was fold 0 of.
     (run_dir / "dataset.txt").write_text(f"{dataset}\n")
-    print("\ntest, fold %d" % cut.fold)
+    print("\ntest, fold %d" % fold)
     for key, value in sorted(results[0].items()):
         print(f"  {key:34s} {value:.2f}")
 
     # A page of test windows with every run, not on request: a macro F1 does not say whether the
     # breaths came out as breaths, and nobody goes back to draw one for a run that looked fine.
-    figure = test_figure(cfg, model, dataset, splits["test"], run_dir)
+    items = test_predictions(model, dataset, splits["test"])
+    print(f"test logits: {save_test_logits(items, run_dir)}")
+    figure = test_figure(cfg, items, run_dir, fold)
     if figure:
         print(f"test windows: {figure}")
 
@@ -176,6 +202,35 @@ def main(cfg: DictConfig) -> None:
         if figure:
             task.get_logger().report_image("test windows", cfg.plot.pick, iteration=0,
                                            local_path=str(figure), max_image_history=1)
+    return results[0]
+
+
+@hydra.main(version_base=None, config_path="parameter", config_name="config")
+def main(cfg: DictConfig) -> None:
+    run_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)
+    dataset = resolve(cfg.data.root, cfg.data.dir, cfg.data.labels.source)
+    manifest = load_windows(dataset)
+    cut = cfg.data.split
+    if SPLIT_COLUMN not in manifest.columns:
+        raise KeyError(f"{dataset} carries no splits - run: "
+                       f"poetry run python make_splits.py --dataset {dataset}")
+
+    wanted = int(cut.folds)
+    available = sum(1 for column in manifest.columns
+                    if column.endswith("_split") and column != SPLIT_COLUMN)
+    if not 1 <= wanted <= available:
+        raise ValueError(f"data.split.folds={wanted}, but {dataset.name} carries {available} - "
+                         f"re-split it, or override to at most {available}")
+
+    for fold in range(wanted):
+        print(f"\n{'=' * 30} fold {fold} of {wanted} {'=' * 30}")
+        run_fold(cfg, dataset, manifest, fold, run_dir / FOLD_DIR.format(fold=fold))
+
+    if wanted > 1:
+        # Aggregated here rather than left to be remembered: the folds are only comparable
+        # because they share a test set, and that is exactly what gets forgotten.
+        print(f"\n{'=' * 30} aggregating {wanted} folds {'=' * 30}")
+        aggregate(run_dir, run_dir)
 
 
 if __name__ == "__main__":
