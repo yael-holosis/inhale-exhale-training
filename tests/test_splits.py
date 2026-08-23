@@ -174,3 +174,32 @@ def test_excluding_a_patient_drops_it_even_when_patients_would_have_taken_it():
     assert set(select(frame, patients=["SL"], exclude_patients=["SL_QA"])["Patient"]) == \
         {"SL0001", "SL0002"}
     assert len(select(frame)) == 3
+
+
+def test_study_is_the_letters_a_patient_name_starts_with():
+    from phase.splits import study_of
+
+    assert study_of("SL0066") == "SL"
+    assert study_of("HOL-001") == "HOL"
+    assert study_of("bs-003") == "bs"
+    assert study_of("SL_QA") == "SL"
+    # No leading letters: its own study, never an empty bucket that swallows every such patient.
+    assert study_of("12345") == "12345"
+
+
+def test_a_patient_belongs_to_exactly_one_study_so_it_can_stratify():
+    """Stratification needs one value per group. A patient spanning two studies would break it."""
+    from phase.splits import STUDY_COLUMN, with_study
+
+    frame = pd.DataFrame({"PatientID": ["SL0001", "SL0001", "HOL-002", "bs-003"],
+                          "env": ["ds_algo"] * 2 + ["ds_prod"] * 2})
+    got = with_study(frame)
+    assert got.groupby(["env", "PatientID"])[STUDY_COLUMN].nunique().max() == 1
+    assert list(got[STUDY_COLUMN]) == ["SL", "SL", "HOL", "bs"]
+
+
+def test_with_study_leaves_an_existing_column_alone():
+    from phase.splits import STUDY_COLUMN, with_study
+
+    frame = pd.DataFrame({"PatientID": ["SL0001"], STUDY_COLUMN: ["hand-set"]})
+    assert with_study(frame)[STUDY_COLUMN].tolist() == ["hand-set"]

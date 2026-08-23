@@ -18,12 +18,18 @@ The group key is `(env, PatientID)`, not the name alone. `PatientID` is a *displ
 identity spaces. Nothing stops a name appearing on both, and if one did, the name alone would
 merge two different people into one group and put half of each on both sides.
 
-**Stratification is a configured list of columns**, one composite key per group, honoured by both
-the test split and the fold split. `env` is the cohort, and it matters: the instances differ in
-acquisition, so a split that ignores it puts folds on different populations.
+**Stratification is a configured list of columns**, one composite key per group, honoured by
+both the test split and the fold split. The default is `study` - the letters a patient's name
+starts with - because a study is a recruitment criterion and therefore a pathology mix, which is
+what the split has to spread. It is also finer than `env`: every study sits on one instance.
+
+A study with a single patient cannot be spread. It lands wholly on one side, and no stratifier
+can do otherwise - the group is the patient, and a patient is not divisible.
 """
 
 from __future__ import annotations
+
+import re
 
 import numpy as np
 import pandas as pd
@@ -31,6 +37,27 @@ import pandas as pd
 TRAIN, VAL, TEST = "train", "val", "test"
 SPLIT_COLUMN = "split"
 FOLD_COLUMN = "fold_{fold}_split"
+STUDY_COLUMN = "study"
+STUDY_PREFIX = re.compile(r"^([A-Za-z]+)")
+
+
+def study_of(patient: str) -> str:
+    """The study a patient belongs to: the letters their name starts with.
+
+    `SL0066` -> `SL`, `HOL-001` -> `HOL`, `bs-003` -> `bs`. A name with no leading letters is
+    its own study rather than an empty one, so nothing collapses silently into one bucket.
+    """
+    found = STUDY_PREFIX.match(str(patient))
+    return found.group(1) if found else str(patient)
+
+
+def with_study(frame: pd.DataFrame) -> pd.DataFrame:
+    """Add `study` if it is absent, so a dataset built before it can still be split on it."""
+    if STUDY_COLUMN in frame.columns:
+        return frame
+    frame = frame.copy()
+    frame[STUDY_COLUMN] = frame["PatientID"].map(study_of)
+    return frame
 
 
 def patient_key(frame: pd.DataFrame, columns) -> pd.Series:
@@ -163,7 +190,7 @@ def split_for(frame: pd.DataFrame, fold: int) -> dict[str, pd.DataFrame]:
 
 
 def describe(splits: dict[str, pd.DataFrame], total: int | None = None,
-             stratify_cols=("env",)) -> str:
+             stratify_cols=(STUDY_COLUMN,)) -> str:
     """One line per split: size, share, stratum mix, and the patients in it."""
     total = total or sum(len(frame) for frame in splits.values())
     lines = []

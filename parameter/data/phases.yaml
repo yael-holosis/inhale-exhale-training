@@ -38,8 +38,9 @@ split:
   # A split may not cut through these. env is part of the identity - the instances have
   # unrelated name spaces, so without it two people sharing a name would merge.
   group_columns: [env, PatientID]
-  # Balanced across test and folds. Empty disables stratification.
-  stratify_cols: [env]
+  # Balanced across test and folds. `study` is the patient-name prefix (SL, HOL, bs) - a study
+  # is a recruitment criterion, so it carries a pathology mix. Empty disables stratification.
+  stratify_cols: [study]
 
 # Null keeps each window its own length - the net is fully convolutional and collate pads per
 # batch. A crop drops the long windows, which are the hard ones.

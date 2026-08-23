@@ -31,7 +31,8 @@ from omegaconf import OmegaConf
 
 from phase.building import (PARAMS_NAME, STATS_NAME, existing_params, load_windows, resolve,
                             summarise, write_windows)
-from phase.splits import FOLD_COLUMN, SPLIT_COLUMN, describe, make_splits, split_for
+from phase.splits import (FOLD_COLUMN, SPLIT_COLUMN, describe, make_splits, split_for,
+                          with_study)
 
 CONFIG_DIR = Path(__file__).parent / "parameter"
 
@@ -60,7 +61,8 @@ def main() -> int:
     args = parser.parse_args()
 
     directory = resolve(cfg.data.root, args.dataset, cfg.data.labels.source)
-    frame = load_windows(directory)
+    # Derived rather than required: a dataset built before `study` existed still splits on it.
+    frame = with_study(load_windows(directory))
     already = [c for c in frame.columns if c == SPLIT_COLUMN or c.endswith("_split")]
     if already and not args.force:
         print(f"{directory} already carries {', '.join(already)}.\n"

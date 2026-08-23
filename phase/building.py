@@ -36,6 +36,7 @@ import yaml
 
 from phase import sources
 from phase.labelsources import LabelSource
+from phase.splits import STUDY_COLUMN, study_of
 from phase.labels import PHASES, class_counts, spans_to_targets
 
 WINDOWS_NAME = "windows.csv"
@@ -383,6 +384,8 @@ def _rows_of_shard(stored, shard: str) -> list[dict[str, Any]]:
             "RadarSignalID": int(stored["signal_id"]),
             "SessionID": int(stored["session_id"]),
             "PatientID": str(stored["patient"]),
+            # The recruitment study, so a split can be stratified on pathology mix.
+            STUDY_COLUMN: study_of(str(stored["patient"])),
             "PatientKey": str(stored["patient_key"]),
             "WindowIndex": int(stored["window_index"][position]),
             "start_index": int(stored["start_index"][position]),
