@@ -171,9 +171,8 @@ def _patient_seed(seed: int, patient: str) -> int:
 def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str, Any]]:
     """One signal's stored windows, each with its samples and its per-sample target.
 
-    Samples are read as stored, never re-oriented: the blob is already the trace the labelling
-    app shows and `ReviewerFlipped` describes *that object*, so turning it over here would put
-    the labels on a picture nobody has seen.
+    Orientation is `LabelSource.orient`, off by default, and runs before the labels so both
+    sources describe the same trace.
 
     A window the source cannot label is **kept**, empty, and counted - except under `human`,
     where `eligible` has already removed the unlabelled ones. "The algorithm found nothing here"
@@ -185,6 +184,7 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str,
         values = np.asarray(values, dtype=np.float32)
         if not values.size:
             continue
+        values = labels.orient(row, values)
         spans, note = labels.rows_for(row, values)
         out.append({
             "window_id": int(row["ID"]),
@@ -194,7 +194,7 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str,
             "respiration_rate": (None if pd.isna(row.get("RespirationRate"))
                                  else float(row["RespirationRate"])),
             "range_bin": None if pd.isna(row.get("RangeBin")) else int(row["RangeBin"]),
-            "reviewer_flipped": bool(row.get("ReviewerFlipped", False)),
+            "reviewer_flipped": bool(row.get(sources.REVIEWER_FLIPPED, False)),
             "system_version": ("" if pd.isna(row.get("SystemVersion"))
                                else str(row["SystemVersion"])),
             "human_spans": int(row.get("Spans", 0) or 0),

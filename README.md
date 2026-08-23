@@ -289,20 +289,20 @@ Alternative if the device needs **causal streaming**: a dilated TCN (Bai, Kolter
 reaches the same receptive field with fewer parameters and runs off a ring buffer. It cannot see past a boundary, so a boundary is
 only callable after it has gone by. Not built - the device already analyses in windows.
 
-### The polarity flip is the augmentation that matters
+### Polarity is a convention, not noise
 
 `select_waveform` returns whichever of a range bin's real or imaginary part has the larger
 standard deviation, and the bin is re-chosen per window, so the stored sign of a window is
-arbitrary. Negating the trace and exchanging inhale with exhale therefore produces a sample that
-is exactly as real as the one it came from - the same measurement written the other way up.
+arbitrary. The build therefore orients each window to the polarity its reviewer labelled
+against - `data.labels.orient_by_reviewer_flip`, applied where `ReviewerFlipped` is set.
 
-That has a consequence worth stating plainly: **the model cannot use absolute polarity to decide
-direction**, because the training set contains both. Direction has to come from breath shape.
-That is the correct constraint - the device does not know a window's polarity either - but
-whether shape alone is sufficient is an **open empirical question** on this data, not a settled
-one. The dataset is built from windows the labelling repo has already turned the right way up
-using `inhale-exhale-detection`'s orientation rule, so the labels are consistent; whether the
-network can reproduce that decision from the trace is what the first runs will show.
+**There is no polarity-flip augmentation.** Negating half the windows at random would throw that
+convention away, and it is the convention the labels are written in. `amplitude_range` stays
+positive for the same reason.
+
+So the model *may* use polarity to decide direction, as long as inference orients its input the
+same way the dataset was oriented. That is a constraint on deployment rather than on training,
+and it is the trade made when the flip came out.
 
 ### What the model is not given
 
@@ -407,8 +407,9 @@ DISABLE_CLEARML=true poetry run python train.py \
 - **The two instances differ in acquisition.** `ds_algo`'s eligible signals are ~51% 300 fps
   two-antenna and 49% 200 fps; `ds_prod` is 100% 200 fps. The preprocessing differs, so a model
   trained on one cohort is not obviously transferable to the other - worth measuring.
-- Whether breath shape alone settles direction under the polarity flip. If it does not, the
-  phase anchor becomes a second input channel.
+- Whether breath shape settles direction without leaning on polarity. It no longer has to,
+  now that windows are oriented - but a model that leans on polarity needs inference to
+  orient its input identically, so it is worth knowing which it is doing.
 - Whether the human set is large enough for a fine-tune rather than only an evaluation.
 - Nothing here is exported for the device yet - no int8 quantization, no ONNX, no timing on
   target hardware.

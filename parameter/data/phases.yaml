@@ -11,10 +11,10 @@ name: phases
 root: data_sets
 dir: latest
 
-# Which instance. `ds_algo` is the data-science cohort - the SL sleep-lab nights; `ds_prod` is
-# the pilots. Run each separately into the same dataset directory with `--into`; nothing is ever
-# written to production.
-env: ds_algo
+# Which instances. `ds_algo` is the data-science cohort - the SL sleep-lab nights; `ds_prod` is
+# the pilots. All of them go into one dataset directory, because the split stratifies on `env`.
+# Nothing is ever written to production.
+env: [ds_algo, ds_prod]
 # Patient prefixes, matching the display name (SL0066) or the patient key (algo-p089, bs-).
 # Null is every patient with uploaded windows.
 patients: null
@@ -45,6 +45,10 @@ labels:
   #   latest    - the most recent, by RecordCreationTime
   #   lowest_id - the first labeller by id, so the choice does not move as people re-save
   on_conflict: latest
+
+  # Negate the waveform where the reviewer set `ReviewerFlipped`, so the trace matches the
+  # orientation they labelled against. Amplitude only - span indices are unaffected.
+  orient_by_reviewer_flip: true
 
   # A window with no stored rate gives the detector nothing to run at - it filters at roughly
   # twice the rate - so it carries no algorithm phases. Kept and labelled entirely unknown:

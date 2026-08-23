@@ -81,7 +81,7 @@ def _ribbon(ax, target: np.ndarray, y: float, fps: float,
 
 def panel(ax, values: np.ndarray, reference: np.ndarray, prediction: np.ndarray, fps: float,
           title: str, colors: Mapping[str, str], span_alpha: float, trace_color: str,
-          reference_label: str = "reference") -> None:
+          reference_label: str = "reference", prediction_label: str = "model") -> None:
     t = np.arange(values.size) / fps
     centred = values - values.mean()
     scale = centred.std() or 1.0
@@ -104,7 +104,7 @@ def panel(ax, values: np.ndarray, reference: np.ndarray, prediction: np.ndarray,
     # a fraction lands at that data value instead.
     ax.text(-0.008, RIBBON_TOP + RIBBON_HEIGHT / 2, reference_label, transform=ax.transAxes,
             ha="right", va="center", fontsize=7.5, color=INK_SOFT)
-    ax.text(-0.008, 0.5, "model", transform=ax.transAxes, ha="right", va="center",
+    ax.text(-0.008, 0.5, prediction_label, transform=ax.transAxes, ha="right", va="center",
             fontsize=7.5, color=INK_SOFT)
 
 
@@ -114,7 +114,8 @@ def legend_handles(colors: Mapping[str, str]) -> list[Patch]:
 
 def plot_windows(items: Sequence[dict[str, Any]], out_path: str | Path, heading: str = "",
                  reference_name: str = "algorithm",
-                 plot_cfg: Mapping[str, Any] | None = None) -> Path:
+                 plot_cfg: Mapping[str, Any] | None = None,
+                 prediction_name: str = "model", caption: str | None = None) -> Path:
     """A page of panels. Each item is `{values, reference, prediction, fps, title}`."""
     if not items:
         raise ValueError("nothing to plot")
@@ -131,13 +132,14 @@ def plot_windows(items: Sequence[dict[str, Any]], out_path: str | Path, heading:
     for ax, item in zip(axes.ravel(), items):
         ax.set_facecolor(SURFACE)
         panel(ax, item["values"], item["reference"], item["prediction"], item["fps"],
-              item["title"], colors, span_alpha, trace_color, reference_name)
+              item["title"], colors, span_alpha, trace_color, reference_name, prediction_name)
     axes.ravel()[-1].set_xlabel("seconds", fontsize=8, color=INK_SOFT, labelpad=6)
 
     if heading:
         fig.suptitle(heading, fontsize=10.5, color=INK, x=0.012, ha="left", y=0.997)
-    fig.text(0.988, 0.997, "shading = model · ribbon = reference", ha="right", va="top",
-             fontsize=8, color=INK_SOFT)
+    fig.text(0.988, 0.997,
+             caption or f"shading = {prediction_name} · ribbon = {reference_name}",
+             ha="right", va="top", fontsize=8, color=INK_SOFT)
     fig.legend(handles=legend_handles(colors), loc="lower center", ncol=4, frameon=False,
                fontsize=8, labelcolor=INK_SOFT, bbox_to_anchor=(0.5, -0.004))
     fig.tight_layout(rect=(0.055, 0.032, 1, 0.978), h_pad=3.0)

@@ -18,9 +18,8 @@ class_weight_cap: 10.0
 event_iou: 0.5
 
 augmentation:
-  # The one that matters: the stored sign is arbitrary, so negating the trace and exchanging
-  # inhale with exhale is the same measurement written the other way up, not a distortion.
-  flip_prob: 0.5
+  # No polarity flip. `labels.orient_by_reviewer_flip` orients every window to the polarity the
+  # reviewer labelled against, and negating half of them at random would throw that away.
   time_warp_prob: 0.5
   time_warp_range: [0.8, 1.25]
   amplitude_prob: 0.5

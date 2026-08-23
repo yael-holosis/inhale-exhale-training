@@ -1,7 +1,7 @@
 """A dataset that looks like a built one, without AWS. For the tests and for a smoke run.
 
 Breaths are asymmetric on purpose - the rise and the fall differ - because a network trained
-under the polarity-flip augmentation has nothing else to tell inhale from exhale. A symmetric
+has nothing but breath shape to tell inhale from exhale. A symmetric
 synthetic set would make the task impossible and the smoke run would look like a bug.
 """
 

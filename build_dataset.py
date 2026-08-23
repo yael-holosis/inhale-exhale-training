@@ -1,8 +1,8 @@
 """Build a dataset directory from the windows already in `RespirationWindow`.
 
-    poetry run python build_dataset.py --catalogue --env ds_algo      # what is there, no writes
-    poetry run python build_dataset.py --env ds_algo                  # a new dataset
-    poetry run python build_dataset.py --env ds_prod --into data_sets/phases_algorithm_...
+    poetry run python build_dataset.py --catalogue          # what is there, no writes
+    poetry run python build_dataset.py                      # a new dataset, every instance
+    poetry run python build_dataset.py --env ds_algo        # one instance only
 
 Each build writes a **new timestamped directory**, self-describing on disk:
 
@@ -25,11 +25,12 @@ window) or `human` (`BreathPhaseTimeRecord`, a few dozen windows). A directory h
 Options
 -------
 
-`--env ds_algo | ds_prod`   Which instance. `ds_algo` is the data-science cohort - the `SL`
-    sleep-lab nights; `ds_prod` is the pilots. Production is only ever read.
+`--env ds_algo [ds_prod ...]`   Which instances, all into one directory. Defaults to
+    `data.env`, which is both. `ds_algo` is the data-science cohort - the `SL` sleep-lab nights;
+    `ds_prod` is the pilots. Production is only ever read.
 
 `--into DIR`   Add to an existing dataset instead of starting one. `latest` resolves to the
-    newest. Use it to put the second cohort beside the first.
+    newest.
 
 `--patients PREFIX [...]`   Match the display name (`SL0066`, `SL`) or the patient key (`bs-`).
 
@@ -70,10 +71,18 @@ def load_config():
     return OmegaConf.merge(root, {"data": data})
 
 
+def as_list(value) -> list[str]:
+    """`data.env` takes one instance or several; a bare string is not a list of characters."""
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value]
+
+
 def parse_args(cfg):
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--env", default=cfg.data.env)
+    parser.add_argument("--env", nargs="+", default=as_list(cfg.data.env), metavar="KEY",
+                        help="one or more instances, built into a single dataset directory")
     parser.add_argument("--into", default=None,
                         help="extend this dataset directory instead of starting a new one")
     parser.add_argument("--labels", choices=list(SOURCES), default=None,
@@ -125,36 +134,45 @@ def main() -> int:
               f"run: aws sso login --profile {sources.profile()}")
         return 1
     if args.catalogue:
-        return show_catalogue(args.env)
+        return max(show_catalogue(env_key) for env_key in args.env)
 
     label_cfg = OmegaConf.to_container(cfg.data.labels, resolve=True)
     if args.labels:
         label_cfg["source"] = args.labels
-    labels = LabelSource(args.env, label_cfg)
 
-    out_dir = target_directory(args, cfg, labels.source)
+    # One directory for every instance: the split stratifies on `env`, so both must be present.
+    source = LabelSource(args.env[0], label_cfg).source
+    out_dir = target_directory(args, cfg, source)
     patients = args.patients if args.patients is not None else list(cfg.data.patients or [])
-    started = stamp()
-    print(f"env {args.env} | labels {labels.source} | patients {patients or 'all'} "
+    print(f"env {', '.join(args.env)} | labels {source} | patients {patients or 'all'} "
           f"| per-patient {args.per_patient or 'all'}\n-> {out_dir}")
 
-    frame, stats = build(env_key=args.env, out_dir=out_dir, labels=labels,
-                         patients=patients or None, signals=args.signals,
-                         per_patient=args.per_patient, seed=args.seed, limit=args.limit)
-    if frame.empty:
+    frame, built, failed = None, 0, 0
+    for env_key in args.env:
+        labels = LabelSource(env_key, label_cfg)
+        started = stamp()
+        print(f"\n[{env_key}]")
+        frame, stats = build(env_key=env_key, out_dir=out_dir, labels=labels,
+                             patients=patients or None, signals=args.signals,
+                             per_patient=args.per_patient, seed=args.seed, limit=args.limit)
+        built, failed = built + stats.signals_built, failed + stats.signals_failed
+        if frame.empty:
+            continue
+        # One entry per instance, so a directory records every invocation that filled it.
+        write_provenance(out_dir, {
+            "started": started, "finished": stamp(), "env": env_key, "patients": patients,
+            "per_patient": args.per_patient, "signals": args.signals, "sample_seed": args.seed,
+            "limit": args.limit, "labels": labels.describe(),
+            "signals_planned": stats.signals_planned, "signals_built": stats.signals_built,
+            "signals_failed": stats.signals_failed, "failures": stats.failures[:50],
+        }, frame)
+
+    if frame is None or frame.empty:
         print("nothing built")
         return 1
 
-    write_provenance(out_dir, {
-        "started": started, "finished": stamp(), "env": args.env, "patients": patients,
-        "per_patient": args.per_patient, "signals": args.signals, "sample_seed": args.seed,
-        "limit": args.limit, "labels": labels.describe(),
-        "signals_planned": stats.signals_planned, "signals_built": stats.signals_built,
-        "signals_failed": stats.signals_failed, "failures": stats.failures[:50],
-    }, frame)
-
     facts = summarise(frame)
-    print(f"\nthis run: {stats.signals_built} signals, {stats.signals_failed} failed")
+    print(f"\nthis run: {built} signals, {failed} failed")
     print(f"dataset:  {facts['signals']} signals, {facts['windows']} windows "
           f"({facts['windows_unlabelled']} carry no label), {facts['samples']:,} samples "
           f"({facts['hours']} h), {facts['patients']} patients over "

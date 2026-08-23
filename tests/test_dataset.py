@@ -206,3 +206,19 @@ def test_dropping_the_last_batch_would_lose_whole_lengths_so_it_is_off_by_defaul
                for index in batch}
     assert not any(lengths[index] == 400 for index in dropped), \
         "drop_last silently removed an entire length group"
+
+
+def test_drift_stays_under_the_breathing_it_is_meant_to_sit_beneath():
+    """`drift_scale` is a fraction of the window, not an absolute amplitude.
+
+    Radar windows carry a std of ~3e-4, so an absolute 0.3 was 315x the breathing and erased it
+    on every window - while keeping the phase labels that described it.
+    """
+    values = (1e-4 * np.sin(np.linspace(0, 12 * np.pi, 200))).astype(np.float32)
+    target = np.zeros(200, dtype=np.int64)
+    dataset = WindowDataset(pd.DataFrame(), ".", augment={"drift_prob": 1.0, "drift_scale": 0.3})
+
+    drifted, _ = dataset._augment(values.copy(), target, np.random.default_rng(0))
+    added = drifted - values
+    assert added.std() < values.std(), (
+        f"drift {added.std():.2e} must sit under the signal {values.std():.2e}")

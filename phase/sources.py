@@ -28,6 +28,9 @@ import yaml
 
 LABELS = "labels"
 DEVICE = "device"
+# The reviewer's polarity flag on `RespirationWindow`. Named once: it reaches the catalogue
+# query, the shard columns and the orientation decision.
+REVIEWER_FLIPPED = "ReviewerFlipped"
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "parameter" / "sources" / "default.yaml"
 
 
@@ -189,7 +192,7 @@ def windows_frame(env_key: str) -> pd.DataFrame:
     return frame(env_key, LABELS, f"""
         SELECT w.ID, w.RadarSignalID, w.WindowIndex, w.WaveformS3Path,
                w.StartIndex, w.EndIndex, w.AnalysisFps, w.RespirationRate, w.RangeBin,
-               w.ReviewerFlipped, w.SystemVersion,
+               w.{REVIEWER_FLIPPED}, w.SystemVersion,
                COUNT(r.ID)                 AS Spans,
                COUNT(DISTINCT r.LabelerID) AS Labelers
         FROM {t['window']} w
@@ -296,9 +299,8 @@ def _s3():
 def window_samples(s3_path: str) -> tuple[np.ndarray, np.ndarray]:
     """`(t_sec, values)` for one window, exactly as stored.
 
-    Never re-oriented here. The blob is already the trace the labelling app shows and
-    `ReviewerFlipped` describes *that object*, so turning it over would put labels on a picture
-    nobody has seen.
+    Never re-oriented here - orientation is a build decision, see `LabelSource.orient`. The blob
+    is already the trace the labelling app shows and `ReviewerFlipped` describes *that object*.
     """
     import io
 

@@ -13,15 +13,16 @@ ones. The pipeline grows a window by 5 s and retries precisely when it cannot fi
 in it, so cropping them back to 200 throws away the slow and irregular breathing first. Measured
 on the built set, a 200-sample crop discards 2.9% of samples and all of them come from that 6.3%.
 
-**The polarity flip is the augmentation that matters.** The sign of a stored window is arbitrary
-- `select_waveform` returns whichever of a bin's real / imaginary parts has the larger std - so
-negating the trace and exchanging inhale with exhale produces a sample that is just as real as
-the one it came from. It is not a distortion of the data; it is the same measurement written the
-other way up. `phase.labels.SWAP_ON_FLIP` is the label half of it.
+**There is no polarity flip.** The build orients every window to the polarity its reviewer
+labelled against - `data.labels.orient_by_reviewer_flip`, applied where `ReviewerFlipped` is set
+- so polarity is a convention the dataset holds, not noise to be averaged out. Negating half the
+windows at random would destroy exactly that convention, so the augmentation is gone and
+`amplitude_range` stays positive for the same reason.
 
-Note what that costs: a model trained under it cannot use absolute polarity to decide direction,
-because the training set contains both. That is the correct constraint - the device has no way to
-know a window's polarity either - but it means direction has to come from breath shape.
+What remains only ever changes the trace, never the labels, with one exception worth knowing:
+`time_warp` resamples, so it changes a window's **length**. `LengthBucketSampler` buckets on the
+stored length, so the warp reintroduces the padding the bucketing exists to remove - masked out
+of the loss, but not hidden from `BatchNorm`. See `notebooks/augmentation.ipynb`.
 """
 
 from __future__ import annotations
@@ -34,7 +35,7 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset, Sampler
 
-from phase.labels import SWAP_ON_FLIP, UNKNOWN
+from phase.labels import UNKNOWN
 
 
 class WindowDataset(Dataset):
@@ -132,9 +133,6 @@ class WindowDataset(Dataset):
     def _augment(self, values: np.ndarray, target: np.ndarray,
                  rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
         cfg = self.augment
-        if rng.random() < cfg.get("flip_prob", 0.0):
-            values = -values
-            target = SWAP_ON_FLIP[target]
         if rng.random() < cfg.get("time_warp_prob", 0.0):
             values, target = time_warp(values, target, cfg.get("time_warp_range", (0.8, 1.25)),
                                        rng)
@@ -142,7 +140,10 @@ class WindowDataset(Dataset):
             low, high = cfg.get("amplitude_range", (0.5, 2.0))
             values = values * float(rng.uniform(low, high))
         if rng.random() < cfg.get("drift_prob", 0.0):
-            values = values + baseline_drift(values.size, cfg.get("drift_scale", 0.3), rng)
+            # Relative to the window, like the noise below. A raw window's std is ~3e-4, so an
+            # absolute 0.3 was 315x the breathing - not a wander under it but a wipe of it.
+            drift = baseline_drift(values.size, cfg.get("drift_scale", 0.3), rng)
+            values = values + drift * (values.std() or 1.0)
         if rng.random() < cfg.get("noise_prob", 0.0):
             scale = cfg.get("noise_scale", 0.05) * (values.std() or 1.0)
             values = values + rng.normal(0.0, scale, values.size).astype(np.float32)

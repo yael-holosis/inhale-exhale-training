@@ -1,0 +1,4 @@
+{
+  "//": "Kernels start in the notebook's directory by default, and this repo imports only from its root (pyproject has package-mode = false). The notebooks bootstrap the path themselves; this just avoids relying on that.",
+  "jupyter.notebookFileRoot": "${workspaceFolder}"
+}

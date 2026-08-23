@@ -60,6 +60,9 @@ def test_padding_a_batch_changes_the_answer_near_the_pad_and_only_there():
     field from the join the two are identical - which is the rule: run one window at a time, or
     bucket by length.
     """
+    # Seeded: the tail difference is a few 1e-4 on unlucky weights, so an unseeded net failed
+    # the threshold below about one run in six.
+    torch.manual_seed(0)
     model = UNet1D(channels=(16, 24, 32), bottleneck=48).eval()
     short = torch.randn(1, 1, 200)
     padded = torch.zeros(2, 1, 600)

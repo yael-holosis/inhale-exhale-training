@@ -47,13 +47,15 @@ class LabelSource:
         if self.on_conflict not in CONFLICT_RULES:
             raise ValueError(f"labels.on_conflict must be one of {CONFLICT_RULES}")
         self.requires_rate = bool(cfg.get("requires_rate", True))
+        self.orient_by_reviewer_flip = bool(cfg.get("orient_by_reviewer_flip", False))
         self._vocabulary: dict[int, str] | None = None
 
     # ------------------------------------------------------------------ description
 
     def describe(self) -> dict[str, Any]:
         """What went into `build_params.yaml`, so a dataset says how it was labelled."""
-        out = {"source": self.source}
+        out = {"source": self.source,
+               "orient_by_reviewer_flip": self.orient_by_reviewer_flip}
         if self.source == ALGORITHM:
             out["requires_rate"] = self.requires_rate
             out["holosissystem"] = production.version()
@@ -71,6 +73,17 @@ class LabelSource:
         if self.source == ALGORITHM:
             return catalogue
         return catalogue[catalogue["Spans"] > 0]
+
+    # ----------------------------------------------------------------- orientation
+
+    def orient(self, row: pd.Series, values: np.ndarray) -> np.ndarray:
+        """The trace the labels describe: negated where the reviewer set `ReviewerFlipped`.
+
+        Amplitude only, never a reversal in time - the human spans are index-based.
+        """
+        if not self.orient_by_reviewer_flip:
+            return values
+        return -values if bool(row.get(sources.REVIEWER_FLIPPED, False)) else values
 
     # ------------------------------------------------------------------------ rows
 
