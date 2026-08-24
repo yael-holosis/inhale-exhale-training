@@ -27,7 +27,8 @@ from phase.metrics import event_level, per_sample
 
 def soft_dice(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
               eps: float = 1.0) -> torch.Tensor:
-    """1 - mean per-class Dice over the batch. Classes absent from a batch are skipped."""
+    """**1 - mean per-class Dice**, so this is a loss and zero is perfect. Classes absent from a
+    batch are skipped. The coefficient itself is logged separately as `dice`."""
     probs = F.softmax(logits, dim=1)
     onehot = F.one_hot(target, N_CLASSES).permute(0, 2, 1).float()
     keep = mask.unsqueeze(1).float()
@@ -50,8 +51,13 @@ class PhaseSegmenter(pl.LightningModule):
         fps: analysis rate, for turning sample errors into seconds in the logs.
     """
 
+    HEADLINE = "macro_f1"
+    """The one metric on the charts, for val and test alike. Per-class Dice and per-class F1 are
+    the same quantity, so this is also the mean Dice - there is no second thing to reconcile."""
+
     def __init__(self, model: dict[str, Any], training: dict[str, Any],
-                 class_weights: list[float] | None = None, fps: float = 10.0):
+                 class_weights: list[float] | None = None, fps: float = 10.0,
+                 fold: int = 0):
         super().__init__()
         # A plain list, not an array: `save_hyperparameters` pickles what it was given, and
         # torch.load defaults to weights_only=True, which refuses a numpy global on reload.
@@ -61,6 +67,7 @@ class PhaseSegmenter(pl.LightningModule):
                           kernel_size=model["kernel_size"], dropout=model.get("dropout", 0.0))
         self.cfg = training
         self.fps = float(fps)
+        self.fold = int(fold)
         weights = (torch.ones(N_CLASSES) if class_weights is None
                    else torch.as_tensor(np.asarray(class_weights), dtype=torch.float32))
         self.register_buffer("class_weights", weights)
@@ -81,16 +88,21 @@ class PhaseSegmenter(pl.LightningModule):
                                       reduction="none")
         counted = mask.float()
         ce = (per_element * counted).sum() / counted.sum().clamp(min=1.0)
-        dice = soft_dice(logits, target, mask)
-        total = self.cfg["ce_weight"] * ce + self.cfg["dice_weight"] * dice
-        return total, {"ce": ce.detach(), "dice": dice.detach()}
+        dice_loss = soft_dice(logits, target, mask)
+        total = self.cfg["ce_weight"] * ce + self.cfg["dice_weight"] * dice_loss
+        # Both, and named for what they are: `soft_dice` returns 1 - Dice, so logging it as
+        # "dice" reads as a coefficient falling towards zero when it is a loss doing its job.
+        return total, {"ce": ce.detach(), "dice_loss": dice_loss.detach(),
+                       "dice": (1.0 - dice_loss).detach()}
 
     def _step(self, batch, stage: str):
         logits = self(batch["x"])
         loss, parts = self._loss(logits, batch["y"], batch["mask"])
         self.log(f"{stage}/loss", loss, prog_bar=(stage == "val"), batch_size=len(batch["y"]))
+        # Under their own title, so the loss charts stay readable - `ce` and `dice` are
+        # diagnostics, not the number anybody reads off a run.
         for name, value in parts.items():
-            self.log(f"{stage}/{name}", value, batch_size=len(batch["y"]))
+            self.log(f"components/{stage}_{name}", value, batch_size=len(batch["y"]))
         if stage != "train":
             self._collect(stage, logits.detach(), batch["y"], batch["mask"])
         return loss
@@ -140,11 +152,50 @@ class PhaseSegmenter(pl.LightningModule):
         for key, value in metrics.items():
             self.log(f"{stage}/{key}", float(value))
 
+    # ------------------------------------------------------------- clearml charts
+
+    def _chart(self, title: str, value: float, iteration: int) -> None:
+        """One chart per (metric, split), one series per fold - the cough convention.
+
+        Fetched off `Task.current_task()` rather than plumbed in, so nothing here depends on
+        ClearML being enabled.
+        """
+        try:
+            from clearml import Task
+        except ImportError:
+            return
+        task = Task.current_task()
+        if task is None:
+            return
+        task.get_logger().report_scalar(title=title, series=f"fold {self.fold}",
+                                        value=float(value), iteration=int(iteration))
+
+    def _logged(self, key: str) -> float | None:
+        value = self.trainer.callback_metrics.get(key) if self.trainer else None
+        return None if value is None else float(value)
+
+    def on_train_epoch_end(self):
+        loss = self._logged("train/loss")
+        if loss is not None:
+            self._chart("loss - train", loss, self.current_epoch)
+
     def on_validation_epoch_end(self):
         self._report("val")
+        for title, key in (("loss - val", "val/loss"),
+                           (f"{self.HEADLINE} - val", f"val/{self.HEADLINE}")):
+            value = self._logged(key)
+            if value is not None:
+                self._chart(title, value, self.current_epoch)
 
     def on_test_epoch_end(self):
         self._report("test")
+        # Iteration is the fold, not the epoch: one point per fold, so the chart reads as a
+        # comparison across folds rather than a line going nowhere.
+        for title, key in (("loss - test", "test/loss"),
+                           (f"{self.HEADLINE} - test", f"test/{self.HEADLINE}")):
+            value = self._logged(key)
+            if value is not None:
+                self._chart(title, value, self.fold)
 
     # --------------------------------------------------------------- optimiser
 

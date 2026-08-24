@@ -127,7 +127,7 @@ def test_figure(cfg: DictConfig, items: list[dict], run_dir: Path,
 
 
 def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
-             run_dir: Path) -> dict:
+             run_dir: Path, task=None) -> dict:
     """Train one fold and test it. Returns that fold's test metrics."""
     pl.seed_everything(cfg.seed + fold, workers=True)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -147,16 +147,11 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
     fps = float(splits["train"]["analysis_fps"].median())
     model = PhaseSegmenter(model=OmegaConf.to_container(cfg.model, resolve=True),
                            training=OmegaConf.to_container(cfg.training, resolve=True),
-                           class_weights=weights.tolist(), fps=fps)
+                           class_weights=weights.tolist(), fps=fps, fold=fold)
     print(f"{cfg.model.name}: {model.net.n_parameters():,} parameters, "
           f"receptive field {model.net.receptive_field()} samples "
           f"({model.net.receptive_field() / fps:.0f} s at {fps:g} fps)")
 
-    task = None
-    if cfg.clearml.enabled:
-        task = initialize_clearml_task(project_name=cfg.clearml.project_name,
-                                       task_name=f"{run_title(cfg)} fold {fold}",
-                                       timeout=cfg.clearml.timeout_s, cfg=cfg)
 
     data = loaders(cfg, splits, dataset)
     checkpoint = ModelCheckpoint(dirpath=run_dir / "checkpoints", monitor=cfg.training.monitor,
@@ -197,11 +192,13 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
     # The checkpoint is the artifact, so it travels with the task rather than sitting in a run
     # directory somebody has to find.
     if task is not None and checkpoint.best_model_path:
-        task.upload_artifact("best_checkpoint", artifact_object=checkpoint.best_model_path)
-        task.upload_artifact("test_metrics", artifact_object=str(run_dir / "test_metrics.csv"))
+        task.upload_artifact(f"fold_{fold}_checkpoint",
+                             artifact_object=checkpoint.best_model_path)
+        task.upload_artifact(f"fold_{fold}_test_metrics",
+                             artifact_object=str(run_dir / "test_metrics.csv"))
         if figure:
-            task.get_logger().report_image("test windows", cfg.plot.pick, iteration=0,
-                                           local_path=str(figure), max_image_history=1)
+            task.get_logger().report_image("test windows", f"fold {fold}", iteration=fold,
+                                           local_path=str(figure), max_image_history=10)
     return results[0]
 
 
@@ -215,6 +212,14 @@ def main(cfg: DictConfig) -> None:
         raise KeyError(f"{dataset} carries no splits - run: "
                        f"poetry run python make_splits.py --dataset {dataset}")
 
+    # One task for the whole run, so every fold reports into the same charts as its own
+    # series. A task per fold would put each on a chart of its own and compare nothing.
+    task = None
+    if cfg.clearml.enabled:
+        task = initialize_clearml_task(project_name=cfg.clearml.project_name,
+                                       task_name=run_title(cfg),
+                                       timeout=cfg.clearml.timeout_s, cfg=cfg)
+
     wanted = int(cut.folds)
     available = sum(1 for column in manifest.columns
                     if column.endswith("_split") and column != SPLIT_COLUMN)
@@ -224,13 +229,26 @@ def main(cfg: DictConfig) -> None:
 
     for fold in range(wanted):
         print(f"\n{'=' * 30} fold {fold} of {wanted} {'=' * 30}")
-        run_fold(cfg, dataset, manifest, fold, run_dir / FOLD_DIR.format(fold=fold))
+        run_fold(cfg, dataset, manifest, fold, run_dir / FOLD_DIR.format(fold=fold),
+                 task)
 
     if wanted > 1:
         # Aggregated here rather than left to be remembered: the folds are only comparable
         # because they share a test set, and that is exactly what gets forgotten.
         print(f"\n{'=' * 30} aggregating {wanted} folds {'=' * 30}")
         aggregate(run_dir, run_dir)
+        if task is not None:
+            # The aggregate is the result; it belongs on the task rather than only on disk.
+            for name in ("fold_report", "per_patient"):
+                figure = run_dir / f"{name}.png"
+                if figure.exists():
+                    task.get_logger().report_image("aggregate", name, iteration=0,
+                                                   local_path=str(figure),
+                                                   max_image_history=1)
+            for name in ("per_fold", "ensemble_metrics", "per_patient"):
+                table = run_dir / f"{name}.csv"
+                if table.exists():
+                    task.upload_artifact(name, artifact_object=str(table))
 
 
 if __name__ == "__main__":
