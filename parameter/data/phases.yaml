@@ -23,8 +23,9 @@ labels:
   labeler_id: null
   # human only, where two people labelled one window: latest | lowest_id.
   on_conflict: latest
-  # Negate the waveform where ReviewerFlipped is set. Amplitude only, indices unaffected.
-  orient_by_reviewer_flip: true
+  # Off. The labelling app draws the blob as stored and the spans were drawn on that view, so
+  # the flip is already accounted for upstream - negating again inverts inhale and exhale.
+  orient_by_reviewer_flip: false
   # No stored rate means no algorithm phases. Kept, labelled unknown - dropping them would bias
   # the set towards easy breathing. human ignores this.
   requires_rate: true
