@@ -31,6 +31,7 @@ from omegaconf import OmegaConf
 
 from phase.building import (PARAMS_NAME, STATS_NAME, existing_params, load_windows, resolve,
                             summarise, write_windows)
+from phase.figures import SPLITS_DIR, split_summary
 from phase.splits import (FOLD_COLUMN, SPLIT_COLUMN, describe, make_splits, split_for,
                           with_study)
 
@@ -99,8 +100,15 @@ def main() -> int:
         print(f"\nfold {fold}")
         print(describe(split_for(frame, fold), total=len(frame),
                        stratify_cols=cut["stratify_cols"]))
+    # A figure per fold, beside the assignment it describes. Test is the same in every one;
+    # what moves is which patients are validation, and that is worth being able to see.
+    drawn = []
+    for fold in range(cut["folds"]):
+        drawn.append(split_summary(frame, fold, Path(directory) / SPLITS_DIR / f"fold_{fold}.png",
+                                   OmegaConf.to_container(cfg.plot, resolve=True)))
     print(f"\nwritten: {directory}/windows.csv "
           f"({SPLIT_COLUMN}, {FOLD_COLUMN.format(fold='0..%d' % (cut['folds'] - 1))})")
+    print(f"         {directory}/{SPLITS_DIR}/  ({len(drawn)} figures, one per fold)")
     return 0
 
 

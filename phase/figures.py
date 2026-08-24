@@ -188,6 +188,7 @@ def score(prediction: np.ndarray, reference: np.ndarray) -> float:
 # ------------------------------------------------------------------------------------- splits
 
 SPLIT_ORDER = (TRAIN, VAL, TEST)
+SPLITS_DIR = "splits"
 
 
 def split_colors_of(cfg: Mapping[str, Any] | None) -> dict[str, str]:
@@ -324,21 +325,15 @@ def fold_report(per_fold, ensemble: Mapping[str, float], interval: tuple[float, 
     dots.spines["bottom"].set_color(GRID)
 
     # ------------------------------------------------------------------ per class
-    width = 0.38
     y = np.arange(len(PHASES))
-    for offset, kind in ((-width / 2, "f1"), (width / 2, "event_f1")):
-        values = [ensemble.get(f"{kind}_{name}", np.nan) for name in PHASES]
-        per_class.barh(y + offset, values, height=width, linewidth=0,
-                       color=[colors[name] for name in PHASES],
-                       alpha=1.0 if kind == "f1" else 0.45,
-                       label="per sample" if kind == "f1" else "per event")
+    per_class.barh(y, [ensemble.get(f"f1_{name}", np.nan) for name in PHASES],
+                   height=0.62, linewidth=0, color=[colors[name] for name in PHASES])
     per_class.set_yticks(y)
     per_class.set_yticklabels(PHASES, fontsize=7.5)
     per_class.invert_yaxis()
     per_class.set_xlim(0, 1)
-    per_class.set_xlabel("F1", fontsize=8, color=INK_SOFT)
+    per_class.set_xlabel("per-sample F1", fontsize=8, color=INK_SOFT)
     per_class.set_title("ensemble, by class", fontsize=8.5, color=INK, loc="left", pad=6)
-    per_class.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="lower right")
     per_class.grid(axis="x", color=GRID, linewidth=0.6)
     per_class.set_axisbelow(True)
     per_class.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
@@ -366,6 +361,131 @@ def fold_report(per_fold, ensemble: Mapping[str, float], interval: tuple[float, 
     fig.text(0.992, 0.995, "one held-out test set, shared by every fold", ha="right", va="top",
              fontsize=8, color=INK_SOFT)
     fig.subplots_adjust(left=0.055, right=0.985, top=0.855, bottom=0.135)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+# ---------------------------------------------------------------------------- per patient
+
+def patient_report(by_patient, ensemble: Mapping[str, float], out_path: str | Path,
+                   plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """Weighted Dice per test patient, worst first, against the pooled score.
+
+    Sorted rather than alphabetical: the question a per-patient chart answers is who it fails on,
+    and that is the top of the list. The window count sits on each bar because a low score on
+    four windows and a low score on forty are different problems.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    colors = colors_of(dict(plot_cfg or {}))
+    splits = split_colors_of(dict(plot_cfg or {}))
+
+    labels = [f"{row.patient}  ({int(row.windows)}w)" for row in by_patient.itertuples()]
+    y = np.arange(len(by_patient))
+    height = 0.28 * len(by_patient) + 1.9
+
+    fig, (bars, classes) = plt.subplots(
+        1, 2, figsize=(12, height), facecolor=SURFACE,
+        gridspec_kw={"width_ratios": [1.15, 1.0], "wspace": 0.26})
+
+    bars.barh(y, by_patient["weighted_dice"], height=0.66, color=splits[TEST], linewidth=0,
+              label="weighted Dice")
+    bars.scatter(by_patient["macro_f1"], y, s=26, color=INK, zorder=3, label="macro F1")
+    pooled = ensemble.get("macro_f1")
+    if pooled is not None:
+        bars.axvline(pooled, color=INK_SOFT, linewidth=1.2, linestyle="--", zorder=2,
+                     label=f"pooled macro F1 {pooled:.2f}")
+    for position, value in zip(y, by_patient["weighted_dice"]):
+        bars.text(value + 0.012, position, f"{value:.2f}", va="center", fontsize=7.5,
+                  color=INK_SOFT)
+    bars.set_yticks(y, labels, fontsize=7.5)
+    bars.invert_yaxis()
+    bars.set_xlim(0, 1.06)
+    bars.set_xlabel("weighted Dice, support-weighted over inhale / exhale / stop", fontsize=8,
+                    color=INK_SOFT)
+    # Below the axes: every bar runs past 0.7, so any in-axes corner collides with one.
+    bars.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, ncol=3,
+                loc="upper center", bbox_to_anchor=(0.5, -0.13))
+    bars.grid(axis="x", color=GRID, linewidth=0.6)
+    bars.set_axisbelow(True)
+    bars.tick_params(colors=INK_SOFT, length=0)
+    for side in ("top", "right", "left"):
+        bars.spines[side].set_visible(False)
+    bars.spines["bottom"].set_color(GRID)
+    bars.set_title("per test patient, worst first", fontsize=8.5, color=INK, loc="left", pad=6)
+
+    called = [name for name in PHASES if f"f1_{name}" in by_patient.columns]
+    left = np.zeros(len(by_patient))
+    width = 1.0 / max(len(called), 1)
+    for offset, name in enumerate(called):
+        classes.barh(y + (offset - (len(called) - 1) / 2) * width * 0.8,
+                     by_patient[f"f1_{name}"], height=width * 0.74,
+                     color=colors[name], linewidth=0, label=name)
+    classes.set_yticks(y, ["" for _ in y])
+    classes.invert_yaxis()
+    classes.set_xlim(0, 1)
+    classes.set_xlabel("F1 by class", fontsize=8, color=INK_SOFT)
+    classes.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, ncol=3,
+                   loc="upper center", bbox_to_anchor=(0.5, -0.13))
+    classes.grid(axis="x", color=GRID, linewidth=0.6)
+    classes.set_axisbelow(True)
+    classes.tick_params(colors=INK_SOFT, length=0)
+    for side in ("top", "right", "left"):
+        classes.spines[side].set_visible(False)
+    classes.spines["bottom"].set_color(GRID)
+    classes.set_title("which class fails, per patient", fontsize=8.5, color=INK, loc="left",
+                      pad=6)
+
+    fig.suptitle("test set - the ensemble, patient by patient", fontsize=10.5, color=INK,
+                 x=0.008, ha="left", y=0.997)
+    fig.subplots_adjust(left=0.145, right=0.985, top=1 - 0.55 / height,
+                        bottom=1.05 / height)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+# ------------------------------------------------------------------------- fold scaling
+
+def scaling_report(scaling, out_path: str | Path, plot_cfg: Mapping[str, Any] | None = None,
+                   headline: str = "macro_f1") -> Path:
+    """What each additional fold buys. Every subset of size k is a point, the line is their mean.
+
+    Points rather than a bare line: with five folds there are ten ways to pick two, and the
+    scatter across them is the part that says whether a gain is real or an ordering artefact.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    splits = split_colors_of(dict(plot_cfg or {}))
+
+    fig, ax = plt.subplots(figsize=(7.2, 4.0), facecolor=SURFACE)
+    ax.set_facecolor(SURFACE)
+
+    means = scaling.groupby("folds_used")[headline].mean()
+    for k, group in scaling.groupby("folds_used"):
+        jitter = np.linspace(-0.13, 0.13, len(group)) if len(group) > 1 else np.zeros(1)
+        ax.scatter(k + jitter, group[headline], s=26, color=splits[TRAIN], alpha=0.75,
+                   zorder=3, label="one subset" if k == 1 else None)
+    ax.plot(means.index, means.to_numpy(), color=splits[TEST], linewidth=1.8, zorder=4,
+            marker="o", markersize=5, label="mean over subsets")
+
+    ax.set_xticks(list(means.index))
+    ax.set_xlabel("folds ensembled", fontsize=8.5, color=INK_SOFT)
+    ax.set_ylabel(headline.replace("_", " "), fontsize=8.5, color=INK_SOFT)
+    ax.set_title(f"{means.iloc[0]:.3f} with one fold, {means.iloc[-1]:.3f} with "
+                 f"{int(means.index[-1])}", fontsize=8.5, color=INK, loc="left", pad=6)
+    ax.grid(axis="y", color=GRID, linewidth=0.6)
+    ax.set_axisbelow(True)
+    ax.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color(GRID)
+    ax.legend(frameon=False, fontsize=7.5, labelcolor=INK_SOFT, loc="lower right")
+
+    fig.suptitle("what each fold is worth on the test set", fontsize=10.5, color=INK,
+                 x=0.01, ha="left", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
