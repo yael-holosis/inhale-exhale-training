@@ -315,13 +315,31 @@ def cache_path(s3_path: str) -> Path | None:
     return None if root is None else root / str(s3_path).lstrip("/")
 
 
+ETAG_KEY = "etag"
+
+
+def _etag(s3_path: str) -> str | None:
+    """The object's current ETag, or None if it cannot be asked."""
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    cfg = config()["s3"]
+    try:
+        head = _s3().s3_client.head_object(Bucket=cfg["bucket"], Key=str(s3_path))
+    except (BotoCoreError, ClientError):
+        return None
+    return str(head.get("ETag", "")).strip('"') or None
+
+
 def window_samples(s3_path: str, refresh: bool = False) -> tuple[np.ndarray, np.ndarray]:
     """`(t_sec, values)` for one window, exactly as stored, from the cache where possible.
 
-    **Only the blob is cached.** A blob is immutable once uploaded, so a hit can never be stale.
-    `ReviewerFlipped` and the labels are database state and do change, so orientation stays a
-    build decision (`LabelSource.orient`) applied to the raw trace on every build - caching an
-    oriented trace would freeze a flag that moves.
+    **A hit is validated against the object's ETag, not assumed fresh.** A window blob is *not*
+    immutable: the labelling app turns a window over by writing the negated samples back to the
+    same key and setting `ReviewerFlipped`, so a cache keyed on the path alone would serve the
+    pre-flip trace forever.
+
+    **Only the blob is cached** - never the labels, which are database state. Orientation needs no
+    caching decision at all: the stored blob already carries it.
     """
     global CACHE_HITS, CACHE_MISSES
     import io
@@ -331,8 +349,19 @@ def window_samples(s3_path: str, refresh: bool = False) -> tuple[np.ndarray, np.
     if cached is not None and cached.exists() and not refresh:
         try:
             with np.load(cached, allow_pickle=False) as stored:
+                held = str(stored[ETAG_KEY]) if ETAG_KEY in stored else None
+                times = stored[cfg["blob_time_key"]]
+                values = stored[cfg["blob_values_key"]]
+            current = _etag(s3_path)
+            # No ETag to compare against - an old cache entry, or S3 unreachable. Re-fetching is
+            # the safe answer for the first and impossible for the second, so serve and let the
+            # download below fail loudly if it must.
+            if held is not None and current is not None and held == current:
                 CACHE_HITS += 1
-                return (stored[cfg["blob_time_key"]], stored[cfg["blob_values_key"]])
+                return times, values
+            if current is None:
+                CACHE_HITS += 1
+                return times, values
         except Exception:                                                  # noqa: BLE001
             # A half-written or unreadable file is a miss, not a failure.
             cached.unlink(missing_ok=True)
@@ -351,6 +380,7 @@ def window_samples(s3_path: str, refresh: bool = False) -> tuple[np.ndarray, np.
         # Through a handle: `np.savez` appends `.npz` to a path that lacks it, which would
         # write beside the name we then try to rename.
         with open(partial, "wb") as handle:
-            np.savez(handle, **{cfg["blob_time_key"]: times, cfg["blob_values_key"]: values})
+            np.savez(handle, **{cfg["blob_time_key"]: times, cfg["blob_values_key"]: values,
+                                ETAG_KEY: np.str_(_etag(s3_path) or "")})
         partial.replace(cached)
     return times, values

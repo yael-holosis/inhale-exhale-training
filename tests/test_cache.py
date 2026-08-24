@@ -30,15 +30,20 @@ def cached(tmp_path, monkeypatch):
             calls["n"] += 1
             buffer = io.BytesIO()
             np.savez(buffer, **{cfg["s3"]["blob_time_key"]: TIMES,
-                                cfg["s3"]["blob_values_key"]: VALUES})
+                                cfg["s3"]["blob_values_key"]: state["values"]})
             return buffer.getvalue()
 
+    state = {"etag": "aaa", "values": VALUES}
+
     class Client:
-        s3_client = type("S3", (), {"get_object": staticmethod(
-            lambda **kwargs: {"Body": Body()})})()
+        s3_client = type("S3", (), {
+            "get_object": staticmethod(lambda **kwargs: {"Body": Body()}),
+            "head_object": staticmethod(lambda **kwargs: {"ETag": f'"{state["etag"]}"'}),
+        })()
 
     monkeypatch.setattr(sources, "_s3", lambda: Client())
     sources.CACHE_HITS = sources.CACHE_MISSES = 0
+    calls["state"] = state
     return calls
 
 
@@ -100,3 +105,25 @@ def test_caching_can_be_turned_off(tmp_path, monkeypatch):
     monkeypatch.setattr(sources, "config", lambda: cfg)
     assert sources.cache_root() is None
     assert sources.cache_path(KEY) is None
+
+
+def test_a_reflipped_blob_is_refetched_rather_than_served_from_cache(cached):
+    """The labelling app turns a window over by writing the negated samples back to the SAME key
+    and toggling `ReviewerFlipped`. A cache keyed on the path alone would serve the pre-flip
+    trace forever, so a hit is only a hit while the ETag still matches."""
+    first = sources.window_samples(KEY)[1]
+    assert np.array_equal(first, VALUES)
+
+    # The reviewer flips it: same key, negated samples, new ETag.
+    cached["state"]["values"] = -VALUES
+    cached["state"]["etag"] = "bbb"
+
+    second = sources.window_samples(KEY)[1]
+    assert np.array_equal(second, -VALUES), "a rewritten blob must not come from the cache"
+    assert cached["n"] == 2
+
+
+def test_an_unchanged_etag_still_serves_from_cache(cached):
+    sources.window_samples(KEY)
+    sources.window_samples(KEY)
+    assert cached["n"] == 1, "an unchanged ETag must not trigger a download"

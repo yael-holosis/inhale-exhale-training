@@ -24,9 +24,9 @@ s3:
   bucket: s3-data-science-01-holosis-health-system-sessions
   blob_time_key: t_sec
   blob_values_key: waveform
-  # Downloaded blobs are kept here and reused. A blob is immutable once uploaded, so a hit is
-  # never stale. Only the blob is cached - never the orientation or the labels, which are
-  # database state and change. Null disables the cache.
+  # Downloaded blobs are kept here and reused, each hit checked against the object's ETag - a
+  # blob is not immutable, the labelling app rewrites it when a reviewer turns a window over.
+  # Only the blob is cached, never the labels. Null disables the cache.
   cache_dir: cache/windows
 
 environments:

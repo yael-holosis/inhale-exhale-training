@@ -51,9 +51,12 @@ follow it.
 
 ## Traps
 
-- **A window blob is immutable.** `fast_small_kmeans` is unseeded, so a rebuild is a different
-  trace that stored labels would no longer describe. Nothing overwrites one; shards inherit that,
-  so a shard on disk is never rebuilt.
+- **A window blob is NOT immutable.** `respiration-phase-labeling`'s `_store_flip` writes the
+  negated samples back to the same S3 key and toggles `ReviewerFlipped` - the column describes the
+  object in the bucket. The blob cache therefore validates every hit against the object's ETag.
+  Shards are still never rebuilt, so a shard predating a flip keeps the old trace.
+- **`ReviewerFlipped` is a record, not an instruction.** The stored blob already carries the
+  orientation, so nothing here negates it - `orient_by_reviewer_flip` exists and stays off.
 - **There is no "labelled" column.** `Spans` counts the phase records on a window. Filtering on a
   column that is not there silently keeps every row - that mistake reported 1,933 labelled
   windows where there were 21.
