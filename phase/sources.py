@@ -296,16 +296,61 @@ def _s3():
     return S3Manager(region=config()["aws"]["region"], bucket_name=cfg["bucket"])
 
 
-def window_samples(s3_path: str) -> tuple[np.ndarray, np.ndarray]:
-    """`(t_sec, values)` for one window, exactly as stored.
+CACHE_HITS = 0
+CACHE_MISSES = 0
 
-    Never re-oriented here - orientation is a build decision, see `LabelSource.orient`. The blob
-    is already the trace the labelling app shows and `ReviewerFlipped` describes *that object*.
+
+def cache_root() -> Path | None:
+    """Where downloaded blobs are kept, or None if caching is off."""
+    configured = config()["s3"].get("cache_dir")
+    if not configured:
+        return None
+    root = Path(configured)
+    return root if root.is_absolute() else Path(__file__).resolve().parent.parent / root
+
+
+def cache_path(s3_path: str) -> Path | None:
+    """The S3 key mirrored under the cache root, so a cached file is identifiable on sight."""
+    root = cache_root()
+    return None if root is None else root / str(s3_path).lstrip("/")
+
+
+def window_samples(s3_path: str, refresh: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """`(t_sec, values)` for one window, exactly as stored, from the cache where possible.
+
+    **Only the blob is cached.** A blob is immutable once uploaded, so a hit can never be stale.
+    `ReviewerFlipped` and the labels are database state and do change, so orientation stays a
+    build decision (`LabelSource.orient`) applied to the raw trace on every build - caching an
+    oriented trace would freeze a flag that moves.
     """
+    global CACHE_HITS, CACHE_MISSES
     import io
 
     cfg = config()["s3"]
+    cached = cache_path(s3_path)
+    if cached is not None and cached.exists() and not refresh:
+        try:
+            with np.load(cached, allow_pickle=False) as stored:
+                CACHE_HITS += 1
+                return (stored[cfg["blob_time_key"]], stored[cfg["blob_values_key"]])
+        except Exception:                                                  # noqa: BLE001
+            # A half-written or unreadable file is a miss, not a failure.
+            cached.unlink(missing_ok=True)
+
     body = _s3().s3_client.get_object(Bucket=cfg["bucket"], Key=str(s3_path))["Body"].read()
     blob = np.load(io.BytesIO(body))
-    return (np.asarray(blob[cfg["blob_time_key"]], dtype=np.float32),
-            np.asarray(blob[cfg["blob_values_key"]], dtype=np.float32))
+    times = np.asarray(blob[cfg["blob_time_key"]], dtype=np.float32)
+    values = np.asarray(blob[cfg["blob_values_key"]], dtype=np.float32)
+    CACHE_MISSES += 1
+
+    if cached is not None:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        # Written beside the target then moved, so an interrupted build leaves no partial file
+        # for the next one to read.
+        partial = cached.with_suffix(cached.suffix + ".partial")
+        # Through a handle: `np.savez` appends `.npz` to a path that lacks it, which would
+        # write beside the name we then try to rename.
+        with open(partial, "wb") as handle:
+            np.savez(handle, **{cfg["blob_time_key"]: times, cfg["blob_values_key"]: values})
+        partial.replace(cached)
+    return times, values

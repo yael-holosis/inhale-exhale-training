@@ -190,7 +190,8 @@ def _patient_seed(seed: int, patient: str) -> int:
 
 # ---------------------------------------------------------------------------------- one signal
 
-def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str, Any]]:
+def windows_of_signal(rows: pd.DataFrame, labels: LabelSource,
+                      refresh: bool = False) -> list[dict[str, Any]]:
     """One signal's stored windows, each with its samples and its per-sample target.
 
     Orientation is `LabelSource.orient`, off by default, and runs before the labels so both
@@ -202,7 +203,7 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource) -> list[dict[str,
     """
     out = []
     for _, row in rows.sort_values("WindowIndex").iterrows():
-        _, values = sources.window_samples(str(row["WaveformS3Path"]))
+        _, values = sources.window_samples(str(row["WaveformS3Path"]), refresh)
         values = np.asarray(values, dtype=np.float32)
         if not values.size:
             continue
@@ -264,7 +265,8 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
 def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] | None = None,
           signals: list[int] | None = None, per_patient: int | None = None, seed: int = 0,
           limit: int | None = None, log=print,
-          exclude_patients: list[str] | None = None) -> tuple[pd.DataFrame, BuildStats]:
+          exclude_patients: list[str] | None = None,
+          refresh_cache: bool = False) -> tuple[pd.DataFrame, BuildStats]:
     """Read the selected signals' windows and write one shard each.
 
     Resumable: a shard already on disk is left alone. A window blob is immutable once uploaded,
@@ -296,7 +298,8 @@ def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] 
             stats.signals_built += 1
             continue
         try:
-            windows = windows_of_signal(chosen[chosen["RadarSignalID"] == signal_id], labels)
+            windows = windows_of_signal(chosen[chosen["RadarSignalID"] == signal_id],
+                                        labels, refresh_cache)
         except Exception as error:                                        # noqa: BLE001
             stats.signals_failed += 1
             stats.failures.append(f"{signal_id}: {type(error).__name__}: {error}")

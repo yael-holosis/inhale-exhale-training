@@ -46,6 +46,10 @@ Options
 
 `--limit N`   Stop after N signals. For a first look.
 
+`--refresh-cache`   Re-download every window. The cache holds raw blobs only, and a blob
+    is immutable, so this is for a corrupted cache rather than for picking up new labels - labels
+    and `ReviewerFlipped` are read from the database on every build regardless.
+
 `--catalogue`   Report what is uploaded on an instance and write nothing.
 """
 
@@ -97,6 +101,8 @@ def parse_args(cfg):
     parser.add_argument("--per-patient", type=int, default=cfg.data.signals_per_patient)
     parser.add_argument("--seed", type=int, default=cfg.data.sample_seed)
     parser.add_argument("--limit", type=int, default=None)
+    parser.add_argument("--refresh-cache", action="store_true",
+                        help="re-download every window instead of using the cache")
     parser.add_argument("--catalogue", action="store_true")
     return parser.parse_args()
 
@@ -163,7 +169,8 @@ def main() -> int:
         frame, stats = build(env_key=env_key, out_dir=out_dir, labels=labels,
                              patients=patients or None, signals=args.signals,
                              per_patient=args.per_patient, seed=args.seed, limit=args.limit,
-                             exclude_patients=excluded or None)
+                             exclude_patients=excluded or None,
+                             refresh_cache=args.refresh_cache)
         built, failed = built + stats.signals_built, failed + stats.signals_failed
         if frame.empty:
             continue
@@ -182,7 +189,10 @@ def main() -> int:
         return 1
 
     facts = summarise(frame)
-    print(f"\nthis run: {built} signals, {failed} failed")
+    cached = sources.CACHE_HITS
+    print(f"\nthis run: {built} signals, {failed} failed"
+          + (f", {cached} windows from cache, {sources.CACHE_MISSES} downloaded"
+             if sources.cache_root() else ", cache off"))
     print(f"dataset:  {facts['signals']} signals, {facts['windows']} windows "
           f"({facts['windows_unlabelled']} carry no label), {facts['samples']:,} samples "
           f"({facts['hours']} h), {facts['patients']} patients over "

@@ -1,0 +1,102 @@
+"""The blob cache. No AWS: the download is stubbed, which is the point - a hit must not reach it.
+
+The property under test is the one that makes the cache safe: it holds the **raw blob** and
+nothing derived from the database. `ReviewerFlipped` and the labels move; the blob does not.
+"""
+
+import numpy as np
+import pytest
+
+from phase import sources
+
+TIMES = np.arange(5, dtype=np.float32) / 10
+VALUES = np.array([0.0, 1.0, 2.0, 1.0, -1.0], dtype=np.float32)
+KEY = "sessions/42/windows/7.npz"
+
+
+@pytest.fixture
+def cached(tmp_path, monkeypatch):
+    """Point the cache at a temporary directory and count downloads."""
+    cfg = dict(sources.config())
+    cfg["s3"] = {**cfg["s3"], "cache_dir": str(tmp_path)}
+    monkeypatch.setattr(sources, "config", lambda: cfg)
+
+    calls = {"n": 0}
+
+    class Body:
+        @staticmethod
+        def read():
+            import io
+            calls["n"] += 1
+            buffer = io.BytesIO()
+            np.savez(buffer, **{cfg["s3"]["blob_time_key"]: TIMES,
+                                cfg["s3"]["blob_values_key"]: VALUES})
+            return buffer.getvalue()
+
+    class Client:
+        s3_client = type("S3", (), {"get_object": staticmethod(
+            lambda **kwargs: {"Body": Body()})})()
+
+    monkeypatch.setattr(sources, "_s3", lambda: Client())
+    sources.CACHE_HITS = sources.CACHE_MISSES = 0
+    return calls
+
+
+def test_the_second_read_does_not_download(cached):
+    first = sources.window_samples(KEY)
+    second = sources.window_samples(KEY)
+    assert cached["n"] == 1, "the second read must come from the cache"
+    assert np.array_equal(first[1], second[1])
+    assert (sources.CACHE_HITS, sources.CACHE_MISSES) == (1, 1)
+
+
+def test_refresh_downloads_again(cached):
+    sources.window_samples(KEY)
+    sources.window_samples(KEY, refresh=True)
+    assert cached["n"] == 2
+
+
+def test_the_cache_holds_the_raw_blob_so_a_changed_flip_is_not_frozen_into_it(cached):
+    """`ReviewerFlipped` lives in the database and can change after the blob was fetched.
+
+    Orientation is applied on top of the cached trace at build time, so flipping the flag
+    changes the next build's output without the cache having to be invalidated.
+    """
+    from phase.labelsources import ALGORITHM, LabelSource
+    import pandas as pd
+
+    _, values = sources.window_samples(KEY)
+    row = pd.Series({"ID": 1, sources.REVIEWER_FLIPPED: True})
+
+    off = LabelSource("ds_algo", {"source": ALGORITHM, "orient_by_reviewer_flip": False})
+    on = LabelSource("ds_algo", {"source": ALGORITHM, "orient_by_reviewer_flip": True})
+
+    # One download, both orientations available from it.
+    assert cached["n"] == 1
+    assert off.orient(row, values).tolist() == VALUES.tolist()
+    assert on.orient(row, values).tolist() == (-VALUES).tolist()
+    # And the file on disk is still the unflipped blob.
+    assert np.array_equal(sources.window_samples(KEY)[1], VALUES)
+
+
+def test_a_corrupt_cache_file_is_a_miss_not_a_crash(cached):
+    sources.window_samples(KEY)
+    corrupt = sources.cache_path(KEY)
+    corrupt.write_bytes(b"not an npz")
+    _, values = sources.window_samples(KEY)
+    assert np.array_equal(values, VALUES)
+    assert cached["n"] == 2
+
+
+def test_no_partial_files_are_left_behind(cached):
+    sources.window_samples(KEY)
+    root = sources.cache_root()
+    assert not list(root.rglob("*.partial"))
+
+
+def test_caching_can_be_turned_off(tmp_path, monkeypatch):
+    cfg = dict(sources.config())
+    cfg["s3"] = {**cfg["s3"], "cache_dir": None}
+    monkeypatch.setattr(sources, "config", lambda: cfg)
+    assert sources.cache_root() is None
+    assert sources.cache_path(KEY) is None
