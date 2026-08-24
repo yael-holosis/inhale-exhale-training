@@ -14,10 +14,25 @@ def test_a_perfect_prediction_scores_one():
     assert scores["accuracy"] == 1.0
 
 
-def test_macro_f1_excludes_unknown():
-    # Unknown is most of a real window; a model that only ever says unknown must not score well.
+def test_macro_f1_counts_unknown_but_saying_only_unknown_still_scores_badly():
+    """`unknown` is in the macro - it is where the mistakes concentrate. A model that says
+    nothing else still scores near zero, because the other three classes carry F1 0."""
     only_unknown = np.zeros_like(TRUTH)
-    assert per_sample(only_unknown, TRUTH)["macro_f1"] == 0.0
+    scores = per_sample(only_unknown, TRUTH)
+    assert scores["f1_unknown"] > 0.0
+    assert scores["f1_inhale"] == scores["f1_exhale"] == scores["f1_stop"] == 0.0
+    # One class in four, and that one only partly right: far below anything usable.
+    assert 0.0 < scores["macro_f1"] < 0.15
+
+
+def test_every_class_contributes_one_equal_term_to_the_macro():
+    scores = per_sample(TRUTH, TRUTH)
+    assert scores["macro_f1"] == 1.0
+    partly = TRUTH.copy()
+    partly[TRUTH == STOP] = UNKNOWN          # lose one class of four entirely
+    lost = per_sample(partly, TRUTH)
+    assert lost["f1_stop"] == 0.0
+    assert lost["macro_f1"] < 1.0
 
 
 def test_the_mask_removes_samples_from_the_score():

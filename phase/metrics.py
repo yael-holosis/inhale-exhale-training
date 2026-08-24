@@ -24,10 +24,15 @@ from phase.labels import PHASES, UNKNOWN, targets_to_spans
 
 def per_sample(pred: np.ndarray, truth: np.ndarray,
                mask: np.ndarray | None = None) -> dict[str, float]:
-    """Precision / recall / F1 per class plus macro F1 over the called classes.
+    """Precision / recall / F1 per class plus macro F1 over **every** class.
 
-    Macro excludes `unknown`: it is 60-70% of the samples and a model that says nothing else
-    would otherwise post a respectable macro score.
+    `unknown` counts. It is 29% of the samples and it is where the model's mistakes concentrate -
+    calling a breath phase over the turn, or falling silent over a real one - so a score that
+    leaves it out cannot see the failure it is most likely to make.
+
+    Macro averages only the classes actually in play - present in the labels or predicted. A
+    class that is neither is undefined, and averaging a zero for it punishes a window for the
+    phases it does not contain.
     """
     pred, truth = np.asarray(pred).ravel(), np.asarray(truth).ravel()
     if mask is not None:
@@ -35,7 +40,7 @@ def per_sample(pred: np.ndarray, truth: np.ndarray,
         pred, truth = pred[keep], truth[keep]
 
     out: dict[str, float] = {}
-    called = []
+    scores = []
     for index, name in enumerate(PHASES):
         tp = float(np.sum((pred == index) & (truth == index)))
         fp = float(np.sum((pred == index) & (truth != index)))
@@ -46,9 +51,12 @@ def per_sample(pred: np.ndarray, truth: np.ndarray,
         out[f"precision_{name}"] = precision
         out[f"recall_{name}"] = recall
         out[f"f1_{name}"] = f1
-        if index != UNKNOWN:
-            called.append(f1)
-    out["macro_f1"] = float(np.mean(called)) if called else 0.0
+        # A class that neither occurs nor is predicted is undefined here, not zero. Scoring it
+        # zero put an all-unknown window the model called correctly at 1/4 - it has one class
+        # right and three that were never in play.
+        if tp + fp + fn > 0:
+            scores.append(f1)
+    out["macro_f1"] = float(np.mean(scores)) if scores else 1.0
     out["accuracy"] = float(np.mean(pred == truth)) if pred.size else 0.0
     return out
 
@@ -60,14 +68,18 @@ def _segments(labels: np.ndarray, drop_unknown: bool = True) -> list[dict]:
 
 def event_level(pred: np.ndarray, truth: np.ndarray,
                 iou_threshold: float = 0.5) -> dict[str, float]:
-    """Greedy best-IoU matching within each class. Reports F1 and boundary error per class."""
+    """Greedy best-IoU matching within each class, `unknown` included.
+
+    Boundary error stays over the called phases: adjacent spans share an edge, so an `unknown`
+    boundary is the same edge as the phase next to it.
+    """
     out: dict[str, float] = {}
     starts, ends = [], []
+    reference_spans = _segments(truth, drop_unknown=False)
+    proposed_spans = _segments(pred, drop_unknown=False)
     for name in PHASES:
-        if name == PHASES[UNKNOWN]:
-            continue
-        reference = [s for s in _segments(truth) if s["phase"] == name]
-        proposed = [s for s in _segments(pred) if s["phase"] == name]
+        reference = [s for s in reference_spans if s["phase"] == name]
+        proposed = [s for s in proposed_spans if s["phase"] == name]
         matched, start_errors, end_errors = _match(reference, proposed, iou_threshold)
         precision = matched / len(proposed) if proposed else 0.0
         recall = matched / len(reference) if reference else 0.0
@@ -76,8 +88,12 @@ def event_level(pred: np.ndarray, truth: np.ndarray,
         out[f"event_recall_{name}"] = recall
         out[f"event_precision_{name}"] = precision
         out[f"n_true_{name}"] = float(len(reference))
-        starts.extend(start_errors)
-        ends.extend(end_errors)
+        if name != PHASES[UNKNOWN]:
+            # Boundary error over the called phases only. Adjacent spans share a boundary, so
+            # an `unknown` edge is the same physical edge as the phase beside it - counting both
+            # would weigh one boundary twice.
+            starts.extend(start_errors)
+            ends.extend(end_errors)
     out["boundary_mae_samples"] = float(np.mean(np.abs(starts + ends))) if starts else float("nan")
     out["start_mae_samples"] = float(np.mean(np.abs(starts))) if starts else float("nan")
     out["end_mae_samples"] = float(np.mean(np.abs(ends))) if ends else float("nan")
