@@ -203,3 +203,23 @@ def test_with_study_leaves_an_existing_column_alone():
 
     frame = pd.DataFrame({"PatientID": ["SL0001"], STUDY_COLUMN: ["hand-set"]})
     assert with_study(frame)[STUDY_COLUMN].tolist() == ["hand-set"]
+
+
+def test_window_ids_collide_across_instances_so_splits_carry_on_the_pair(tmp_path):
+    """`RespirationWindowID` is unique per instance, not across them - 13 of 360 collided on the
+    first two-cohort set. Carrying splits on the id alone fans those rows out."""
+    from phase.building import WINDOWS_NAME, read_windows, write_windows
+    from tests import synthetic
+
+    manifest = synthetic.build(tmp_path, n_patients=2,
+                               environments=("ds_algo", "ds_prod"))
+    # The same id on both instances, which is what production and the algo cohort actually do.
+    manifest.loc[manifest.index[0], "RespirationWindowID"] = 1058
+    other = manifest[manifest["env"] != manifest.iloc[0]["env"]]
+    if len(other):
+        manifest.loc[other.index[0], "RespirationWindowID"] = 1058
+    manifest[SPLIT_COLUMN] = "train"
+    write_windows(tmp_path, manifest)
+
+    rebuilt = read_windows(tmp_path)
+    assert len(rebuilt) == len(manifest), "a colliding id must not duplicate rows"

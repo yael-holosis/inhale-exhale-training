@@ -368,8 +368,11 @@ def read_windows(out_dir: Path) -> pd.DataFrame:
         stored = pd.read_csv(previous)
         carried = [c for c in stored.columns if c == "split" or c.endswith("_split")]
         if carried:
-            frame = frame.merge(stored[["RespirationWindowID", *carried]],
-                                on="RespirationWindowID", how="left")
+            # On (env, id), not the id alone: `RespirationWindowID` is unique per instance,
+            # not across them - 13 of 360 collide on the current set - so merging on the id
+            # would fan those rows out and cross-assign their splits.
+            keys = ["env", "RespirationWindowID"]
+            frame = frame.merge(stored[[*keys, *carried]], on=keys, how="left")
     return frame
 
 
