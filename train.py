@@ -197,9 +197,8 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
                              artifact_object=checkpoint.best_model_path)
         task.upload_artifact(f"fold_{fold}_test_metrics",
                              artifact_object=str(run_dir / "test_metrics.csv"))
-        if figure:
-            task.get_logger().report_image("test windows", f"fold {fold}", iteration=fold,
-                                           local_path=str(figure), max_image_history=10)
+        # The per-fold page is not uploaded: the aggregate writes every test window for both
+        # passes, so a third undifferentiated "test windows" group is only noise.
     return results[0]
 
 
@@ -215,11 +214,20 @@ def main(cfg: DictConfig) -> None:
 
     # One task for the whole run, so every fold reports into the same charts as its own
     # series. A task per fold would put each on a chart of its own and compare nothing.
+    # The division a result is reported against: train against test, the same in every fold.
+    # Validation rotates inside the training side and is a property of a fold, not of the run.
+    splits_figure = figures.split_summary(
+        manifest, None, run_dir / "splits.png",
+        OmegaConf.to_container(cfg.plot, resolve=True))
+
     task = None
     if cfg.clearml.enabled:
         task = initialize_clearml_task(project_name=cfg.clearml.project_name,
                                        task_name=run_title(cfg),
                                        timeout=cfg.clearml.timeout_s, cfg=cfg)
+    if task is not None and splits_figure.exists():
+        task.get_logger().report_image("splits", "train and test, by patient", iteration=0,
+                                       local_path=str(splits_figure), max_image_history=1)
 
     wanted = int(cut.folds)
     available = sum(1 for column in manifest.columns
@@ -237,7 +245,7 @@ def main(cfg: DictConfig) -> None:
         # Aggregated here rather than left to be remembered: the folds are only comparable
         # because they share a test set, and that is exactly what gets forgotten.
         print(f"\n{'=' * 30} aggregating {wanted} folds {'=' * 30}")
-        aggregate(run_dir, run_dir)
+        aggregate(run_dir, run_dir, label_source=str(cfg.data.labels.source))
         if task is not None:
             # The aggregate is the result; it belongs on the task rather than only on disk.
             # Both passes go up: `raw` is the network alone, `viterbi` is after post-processing,
@@ -253,9 +261,15 @@ def main(cfg: DictConfig) -> None:
                     table = run_dir / pass_name / f"{name}.csv"
                     if table.exists():
                         task.upload_artifact(f"{pass_name}_{name}", artifact_object=str(table))
+            for pass_name in ("raw", "viterbi"):
+                pages = sorted((run_dir / pass_name / "test_windows").glob("page_*.png"))
+                for page in pages[:6]:
+                    logger.report_image(f"test windows - {pass_name}", page.stem,
+                                        iteration=0, local_path=str(page),
+                                        max_image_history=6)
             comparison = run_dir / "raw_vs_viterbi.png"
             if comparison.exists():
-                logger.report_image("aggregate", "raw_vs_viterbi", iteration=0,
+                logger.report_image("raw vs viterbi", "what the decoder changed", iteration=0,
                                     local_path=str(comparison), max_image_history=1)
             if (run_dir / "raw_vs_viterbi.csv").exists():
                 task.upload_artifact("raw_vs_viterbi",

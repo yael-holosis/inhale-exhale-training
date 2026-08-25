@@ -174,7 +174,7 @@ def traces_for(runs: Path, window_ids: np.ndarray,
 
 
 def draw_every_window(runs: Path, out_dir: Path, ensemble: dict, windows, cost, min_duration,
-                      plot_cfg, per_page: int = 8) -> list[Path]:
+                      plot_cfg, per_page: int = 8, shading: str = "ensemble") -> list[Path]:
     """Every test window with the ensemble's answer, paginated.
 
     All of them, not a spread: a page of six says what the tails look like, and this says how
@@ -206,10 +206,10 @@ def draw_every_window(runs: Path, out_dir: Path, ensemble: dict, windows, cost, 
         chunk = items[page * per_page:(page + 1) * per_page]
         written.append(figures.plot_windows(
             chunk, pages_dir / f"page_{page + 1:02d}.png",
-            f"test set, ensemble · page {page + 1} of {total} · "
+            f"test set, ensemble {shading} · page {page + 1} of {total} · "
             f"windows {page * per_page + 1}-{page * per_page + len(chunk)} of {len(items)}",
-            "labeller", plot_cfg, prediction_name="ensemble",
-            caption="shading = ensemble · ribbon = labeller"))
+            "labeller", plot_cfg, prediction_name=shading,
+            caption=f"shading = {shading} · ribbon = labeller"))
     return written
 
 
@@ -244,8 +244,28 @@ RAW = "raw"
 DECODED = "viterbi"
 
 
+HYDRA_CONFIG = Path(".hydra") / "config.yaml"
+
+
+def label_source_of(runs: Path) -> str:
+    """The label source the run actually used, off its own Hydra config.
+
+    Not from `parameter/`: `OmegaConf.load` does not resolve Hydra's `defaults:`, so the merged
+    tree has no `data` at all and every run silently scored as `algorithm` - decoding human
+    labels under a table that forbids their commonest transition.
+    """
+    for candidate in (runs / HYDRA_CONFIG, *(d / HYDRA_CONFIG for d in sorted(runs.iterdir())
+                                             if d.is_dir())):
+        if candidate.is_file():
+            found = OmegaConf.select(OmegaConf.load(candidate), "data.labels.source")
+            if found:
+                return str(found)
+    print(f"no .hydra config under {runs} - assuming labels.source={ALGORITHM}")
+    return ALGORITHM
+
+
 def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
-              per_page: int = 8) -> dict | None:
+              per_page: int = 8, label_source: str | None = None) -> dict | None:
     """Pool every fold under `runs`, scored **twice** - once on the network's own argmax and once
     through the decoder - so what the post-processing is worth is visible rather than assumed.
 
@@ -276,7 +296,9 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
     decoding = OmegaConf.to_container(cfg.training.decoding, resolve=True)
     # The same table the run decoded with - scoring under a different one would measure a
     # model nobody trained.
-    source = str(cfg.data.labels.source) if "data" in cfg else ALGORITHM
+    source = label_source or label_source_of(runs)
+    print(f"labels.source = {source}, "
+          f"transition table = {sorted(allowed_for(decoding, source))}")
     cost = (transition_matrix(allowed_for(decoding, source), decoding["switch_penalty"])
             if decoding["viterbi"] else None)
     min_duration = decoding["min_duration"] if decoding["enforce_min"] else None
@@ -366,13 +388,12 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
                         out_dir / "fold_report.png", plot_cfg, headline=HEADLINE)
     figures.patient_report(scored, metrics, out_dir / "per_patient.png", plot_cfg)
     figures.scaling_report(scaling, out_dir / "fold_scaling.png", plot_cfg, headline=HEADLINE)
-    if label == DECODED:
-        # Only once: the pages are the same windows either way, and the decoded answer is the
-        # one a reader is checking.
-        pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
-                                  plot_cfg, per_page)
-        if pages:
-            print(f"every test window: {len(pages)} pages in {out_dir / PAGES_DIR}")
+    # Both passes get their own pages: seeing the same window decoded and undecoded is how the
+    # post-processing is judged by eye rather than only by a metric.
+    pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
+                              plot_cfg, per_page, shading=label)
+    if pages:
+        print(f"every test window ({label}): {len(pages)} pages in {out_dir / PAGES_DIR}")
     print(f"  -> {out_dir}/")
     return metrics
 
@@ -405,9 +426,12 @@ def main() -> int:
     parser.add_argument("--bootstrap", type=int, default=2000)
     parser.add_argument("--per-page", type=int, default=8,
                         help="test windows per page in the full set of panels")
+    parser.add_argument("--labels", default=None,
+                        help="label source, for the transition table (default: read the run's "
+                             "own .hydra config)")
     args = parser.parse_args()
     return 0 if aggregate(Path(args.runs), args.out and Path(args.out),
-                          args.bootstrap, args.per_page) else 1
+                          args.bootstrap, args.per_page, args.labels) else 1
 
 
 if __name__ == "__main__":
