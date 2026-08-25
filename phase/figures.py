@@ -199,9 +199,13 @@ def split_colors_of(cfg: Mapping[str, Any] | None) -> dict[str, str]:
     return chosen
 
 
-def split_summary(manifest, fold: int, out_path: str | Path,
+def split_summary(manifest, fold: int | None, out_path: str | Path,
                   plot_cfg: Mapping[str, Any] | None = None) -> Path:
-    """Where every window went, per patient, for one fold.
+    """Where every window went, per patient.
+
+    `fold=None` draws the held-out split alone - train against test, which is the same in every
+    fold and is the division a result is reported against. An integer draws that fold, where
+    validation is carved out of the training side.
 
     Per patient rather than per split total, because the split is *by patient* - a total says
     the proportions came out right while hiding that one person carries a third of the test set.
@@ -209,15 +213,18 @@ def split_summary(manifest, fold: int, out_path: str | Path,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     colors = split_colors_of(dict(plot_cfg or {}))
-    column = FOLD_COLUMN.format(fold=fold)
+    if fold is None:
+        column, order = SPLIT_COLUMN, (TRAIN, TEST)
+    else:
+        column, order = FOLD_COLUMN.format(fold=fold), SPLIT_ORDER
     if column not in manifest.columns:
         raise KeyError(f"{column} not in the manifest - run make_splits.py first")
 
     counts = (manifest.groupby(["env", "PatientID", column]).size().unstack(fill_value=0)
-              .reindex(columns=list(SPLIT_ORDER), fill_value=0))
+              .reindex(columns=list(order), fill_value=0))
     # Ordered by which split a patient belongs to, then by size: patients land wholly in one
     # split, so grouping them makes the by-patient rule visible instead of implied.
-    counts["_where"] = [SPLIT_ORDER.index(row.idxmax()) for _, row in counts.iterrows()]
+    counts["_where"] = [order.index(row.idxmax()) for _, row in counts.iterrows()]
     counts = counts.sort_values(["_where", "env"]).drop(columns="_where")
 
     labels = [f"{patient}  ({env.replace('ds_', '')})" for env, patient in counts.index]
@@ -227,10 +234,11 @@ def split_summary(manifest, fold: int, out_path: str | Path,
     height = 0.26 * len(counts) + 1.9
     fig, (ax, bar) = plt.subplots(
         2, 1, figsize=(10, height), facecolor=SURFACE,
-        gridspec_kw={"height_ratios": [0.26 * len(counts), 0.62], "hspace": 0.30})
+        gridspec_kw={"height_ratios": [0.26 * len(counts), 0.62],
+                     "hspace": min(0.30, 6.0 / max(len(counts), 1))})
 
     left = np.zeros(len(counts))
-    for split in SPLIT_ORDER:
+    for split in order:
         values = counts[split].to_numpy()
         ax.barh(labels, values, left=left, color=colors[split], label=split,
                 height=0.74, linewidth=0)
@@ -251,7 +259,7 @@ def split_summary(manifest, fold: int, out_path: str | Path,
                  loc="left", pad=6)
 
     start = 0.0
-    for split in SPLIT_ORDER:
+    for split in order:
         n = int(totals.get(split, 0))
         if not n:
             continue
@@ -263,7 +271,8 @@ def split_summary(manifest, fold: int, out_path: str | Path,
     bar.set_xlim(0, windows)
     bar.set_ylim(-0.5, 0.5)
     bar.axis("off")
-    bar.set_title(f"fold {fold}: {windows} windows, "
+    heading = "held out once" if fold is None else f"fold {fold}"
+    bar.set_title(f"{heading}: {windows} windows, "
                   f"{manifest['RadarSignalID'].nunique()} signals, "
                   f"{manifest.groupby(['env', 'PatientID']).ngroups} patients",
                   fontsize=8.5, color=INK, loc="left", pad=4)
