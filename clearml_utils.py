@@ -78,10 +78,12 @@ def initialize_clearml_task(project_name: str, task_name: str, timeout: int = 10
 
     try:
         os.environ["CLEARML_API_DEFAULT_REQ_TIMEOUT"] = str(timeout)
-        # matplotlib autocapture off: one Debug Samples entry per savefig otherwise, and the
-        # figures here are reported explicitly.
+        # Both autocaptures off, for the same reason: everything here is reported explicitly.
+        # TensorBoard capture would put `val/loss` on a "val" chart keyed by step *and* leave the
+        # explicit `loss - val` chart keyed by epoch - the same number twice, and the automatic
+        # one cannot separate the folds because they share a task.
         task = Task.init(project_name=project_name, task_name=task_name,
-                         auto_connect_frameworks={"matplotlib": False})
+                         auto_connect_frameworks={"matplotlib": False, "tensorboard": False})
         print(f"ClearML task: {project_name} / {task_name}")
         if cfg is not None:
             try:

@@ -95,6 +95,8 @@ class PhaseSegmenter(pl.LightningModule):
                      if decoding.get("viterbi") else None)
         self.min_duration = decoding.get("min_duration") if decoding.get("enforce_min") else None
         self._epoch: dict[str, list] = {}
+        self._ce: list[float] = []
+        self._dice: list[float] = []
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
@@ -117,10 +119,11 @@ class PhaseSegmenter(pl.LightningModule):
         logits = self(batch["x"])
         loss, parts = self._loss(logits, batch["y"], batch["mask"])
         self.log(f"{stage}/loss", loss, prog_bar=(stage == "val"), batch_size=len(batch["y"]))
-        # Under their own title, so the loss charts stay readable - `ce` and `dice` are
-        # diagnostics, not the number anybody reads off a run.
-        for name, value in parts.items():
-            self.log(f"components/{stage}_{name}", value, batch_size=len(batch["y"]))
+        if stage == "train":
+            # Accumulated rather than logged per step: the two training charts are epoch means,
+            # and a per-step series of either is unreadable at 60 epochs.
+            self._ce.append(float(parts["ce"]))
+            self._dice.append(float(parts["dice"]))
         if stage != "train":
             self._collect(stage, logits.detach(), batch["y"], batch["mask"])
         return loss
@@ -167,8 +170,10 @@ class PhaseSegmenter(pl.LightningModule):
         if "boundary_mae_samples" in metrics:
             metrics["boundary_mae_sec"] = metrics["boundary_mae_samples"] / self.fps
 
-        for key, value in metrics.items():
-            self.log(f"{stage}/{key}", float(value))
+        # Only the headline. Logging all two dozen put every metric on one chart per split,
+        # which is unreadable - and `report_folds.py` recomputes them all from the saved logits
+        # anyway, into `raw/` and `viterbi/`.
+        self.log(f"{stage}/{self.HEADLINE}", float(metrics.get(self.HEADLINE, 0.0)))
 
     # ------------------------------------------------------------- clearml charts
 
@@ -196,6 +201,14 @@ class PhaseSegmenter(pl.LightningModule):
         loss = self._logged("train/loss")
         if loss is not None:
             self._chart("loss - train", loss, self.current_epoch)
+        # `dice` is the coefficient, 1 - the loss term, so it rises towards 1 like every other
+        # score on the page rather than falling towards zero.
+        if self._dice:
+            self._chart("dice - train", sum(self._dice) / len(self._dice), self.current_epoch)
+        if self._ce:
+            self._chart("ce - train", sum(self._ce) / len(self._ce), self.current_epoch)
+        self._ce.clear()
+        self._dice.clear()
 
     def on_validation_epoch_end(self):
         self._report("val")
