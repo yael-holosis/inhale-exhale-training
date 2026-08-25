@@ -20,9 +20,26 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from models.unet1d import UNet1D
+from phase.labelsources import ALGORITHM, SOURCES
 from phase.decode import decode, transition_matrix
 from phase.labels import N_CLASSES, PHASES
 from phase.metrics import event_level, per_sample
+
+
+def allowed_for(decoding: dict, label_source: str) -> dict:
+    """The transition table for this label set.
+
+    Keyed by source, because the two label sets disagree about the commonest transition of all:
+    a person draws inhale straight into exhale, production never does. A flat table is taken as
+    written so an older config still loads.
+    """
+    allowed = decoding["allowed"]
+    if not set(allowed) & set(SOURCES):
+        return allowed
+    if label_source not in allowed:
+        raise KeyError(f"decoding.allowed has no table for labels.source={label_source!r}; "
+                       f"it has {sorted(allowed)}")
+    return allowed[label_source]
 
 
 def soft_dice(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
@@ -57,7 +74,7 @@ class PhaseSegmenter(pl.LightningModule):
 
     def __init__(self, model: dict[str, Any], training: dict[str, Any],
                  class_weights: list[float] | None = None, fps: float = 10.0,
-                 fold: int = 0):
+                 fold: int = 0, label_source: str = ALGORITHM):
         super().__init__()
         # A plain list, not an array: `save_hyperparameters` pickles what it was given, and
         # torch.load defaults to weights_only=True, which refuses a numpy global on reload.
@@ -73,7 +90,8 @@ class PhaseSegmenter(pl.LightningModule):
         self.register_buffer("class_weights", weights)
 
         decoding = training.get("decoding", {})
-        self.cost = (transition_matrix(decoding["allowed"], decoding["switch_penalty"])
+        self.cost = (transition_matrix(allowed_for(decoding, label_source),
+                                       decoding["switch_penalty"])
                      if decoding.get("viterbi") else None)
         self.min_duration = decoding.get("min_duration") if decoding.get("enforce_min") else None
         self._epoch: dict[str, list] = {}

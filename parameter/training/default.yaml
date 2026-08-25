@@ -35,10 +35,22 @@ decoding:
   switch_penalty: 2.0
   # Samples at 10 fps. Anything shorter is a decoder artefact, not a breath.
   min_duration: {unknown: 1, inhale: 3, exhale: 3, stop: 2}
-  # Describes THIS label set, not physiology: production emits no phase at the turn, so
-  # inhale -> unknown -> exhale is normal and inhale -> exhale does not occur.
+  # Which class may follow which. Describes the LABEL SET, not physiology, so there is one table
+  # per source - a table from the wrong one forbids transitions the labels are full of, and
+  # Viterbi then bridges them with a one-sample `unknown` on every breath.
   allowed:
-    unknown: [inhale, exhale, stop]
-    inhale:  [unknown]
-    exhale:  [unknown, stop]
-    stop:    [unknown, inhale]
+    # Production emits no phase at the turn, so inhale -> unknown -> exhale is the normal path
+    # and inhale -> exhale does not occur.
+    algorithm:
+      unknown: [inhale, exhale, stop]
+      inhale:  [unknown]
+      exhale:  [unknown, stop]
+      stop:    [unknown, inhale]
+    # People draw the phases touching. Measured over 7,713 span transitions in the human set:
+    # inhale->exhale 33.3%, stop->inhale 30.0%, exhale->stop 29.9%, exhale->inhale 2.2%, and
+    # everything into or out of `unknown` under 2%. Only inhale->stop is absent (1 occurrence).
+    human:
+      unknown: [inhale, exhale, stop]
+      inhale:  [exhale, unknown]
+      exhale:  [stop, inhale, unknown]
+      stop:    [inhale, unknown]

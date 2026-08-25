@@ -147,7 +147,8 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
     fps = float(splits["train"]["analysis_fps"].median())
     model = PhaseSegmenter(model=OmegaConf.to_container(cfg.model, resolve=True),
                            training=OmegaConf.to_container(cfg.training, resolve=True),
-                           class_weights=weights.tolist(), fps=fps, fold=fold)
+                           class_weights=weights.tolist(), fps=fps, fold=fold,
+                           label_source=str(cfg.data.labels.source))
     print(f"{cfg.model.name}: {model.net.n_parameters():,} parameters, "
           f"receptive field {model.net.receptive_field()} samples "
           f"({model.net.receptive_field() / fps:.0f} s at {fps:g} fps)")

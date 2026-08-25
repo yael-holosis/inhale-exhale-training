@@ -1,6 +1,7 @@
 """The decoder: impossible transitions cannot survive, and neither can one-sample phases."""
 
 import numpy as np
+import pytest
 
 from phase.decode import decode, enforce_min_duration, transition_matrix
 from phase.labels import EXHALE, INHALE, PHASE_IDS, STOP, UNKNOWN
@@ -42,3 +43,35 @@ def test_a_run_at_exactly_the_floor_survives():
 def test_decoding_without_a_cost_matrix_is_argmax():
     sequence = [UNKNOWN, INHALE, INHALE, EXHALE]
     assert decode(_logits(sequence)).tolist() == sequence
+
+
+def test_the_human_table_lets_exhale_follow_inhale_directly():
+    """The commonest transition people draw - 33% of 7,713 - and the algorithm table forbids it.
+
+    Forbidden, Viterbi bridges it with a one-sample `unknown` on every single breath, which is
+    an artefact of the table rather than anything the model said.
+    """
+    from omegaconf import OmegaConf
+
+    from models.lightning_module import allowed_for
+
+    decoding = OmegaConf.to_container(
+        OmegaConf.load("parameter/training/default.yaml").decoding, resolve=True)
+
+    assert "exhale" in allowed_for(decoding, "human")["inhale"]
+    assert "exhale" not in allowed_for(decoding, "algorithm")["inhale"]
+
+
+def test_a_flat_table_is_taken_as_written():
+    """An older config has no per-source keys and must still load."""
+    from models.lightning_module import allowed_for
+
+    flat = {"allowed": {"inhale": ["unknown"], "unknown": ["inhale"]}}
+    assert allowed_for(flat, "human") == flat["allowed"]
+
+
+def test_an_unnamed_source_fails_rather_than_picking_a_table():
+    from models.lightning_module import allowed_for
+
+    with pytest.raises(KeyError):
+        allowed_for({"allowed": {"human": {}, "algorithm": {}}}, "something-else")

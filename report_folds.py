@@ -33,10 +33,12 @@ import numpy as np
 import pandas as pd
 from omegaconf import OmegaConf
 
+from models.lightning_module import allowed_for
 from phase import figures
 from phase.building import load_windows, shard_path
 from phase.decode import decode, transition_matrix
 from phase.labels import N_CLASSES, PHASES, UNKNOWN
+from phase.labelsources import ALGORITHM
 from phase.metrics import event_level, per_sample
 from phase.splits import STUDY_COLUMN, study_of
 
@@ -135,8 +137,11 @@ PAGES_DIR = "test_windows"
 
 
 def traces_for(runs: Path, window_ids: np.ndarray,
-               envs: np.ndarray) -> dict[tuple[str, int], np.ndarray]:
-    """The stored waveform for each test window, keyed by `(env, RespirationWindowID)`.
+               envs: np.ndarray) -> dict[tuple[str, int], dict]:
+    """The stored waveform and provenance for each test window, keyed by `(env, window id)`.
+
+    The signal and the index within it come along because they are what identifies a window in
+    the labelling app - the window id alone does not, it collides across the two instances.
 
     Keyed by the pair because the id alone is not unique - the two instances have separate id
     spaces and 13 of 360 windows collide on the current set. The traces come from the dataset the
@@ -161,7 +166,10 @@ def traces_for(runs: Path, window_ids: np.ndarray,
         with np.load(shard_path(dataset, str(row["shard"])), allow_pickle=False) as stored:
             position = int(row["position"])
             start, end = stored["offsets"][position], stored["offsets"][position + 1]
-            out[key] = stored["values"][start:end].astype(np.float32)
+            out[key] = {"values": stored["values"][start:end].astype(np.float32),
+                        "signal": int(row["RadarSignalID"]),
+                        "session": int(row["SessionID"]),
+                        "window_index": int(row["WindowIndex"])}
     return out
 
 
@@ -179,16 +187,17 @@ def draw_every_window(runs: Path, out_dir: Path, ensemble: dict, windows, cost, 
 
     items = []
     for index, window_id in enumerate(ensemble["window_id"].tolist()):
-        values = traces.get((str(ensemble["env"][index]), int(window_id)))
-        if values is None:
+        found = traces.get((str(ensemble["env"][index]), int(window_id)))
+        if found is None:
             continue
         logits, truth = windows[index]
         prediction = decode(logits, cost, min_duration)
-        items.append({"values": values, "reference": truth, "prediction": prediction,
+        items.append({"values": found["values"], "reference": truth, "prediction": prediction,
                       "fps": float(ensemble["fps"][index]),
-                      "title": (f"{ensemble['patient'][index]} · window {int(window_id)} · "
-                                f"{ensemble['env'][index]} · macro F1 "
-                                f"{figures.score(prediction, truth):.2f}")})
+                      "title": (f"{ensemble['patient'][index]} · {ensemble['env'][index]} · "
+                                f"signal {found['signal']} · session {found['session']} · "
+                                f"window {int(window_id)} (index {found['window_index']}) · "
+                                f"macro F1 {figures.score(prediction, truth):.2f}")})
 
     pages_dir = Path(out_dir) / PAGES_DIR
     written = []
@@ -255,11 +264,13 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
         OmegaConf.load("parameter/config.yaml"),
         {"training": OmegaConf.load("parameter/training/default.yaml"),
          "plot": OmegaConf.load("parameter/config.yaml").plot})
-    decoding = cfg.training.decoding
-    cost = (transition_matrix(OmegaConf.to_container(decoding.allowed, resolve=True),
-                              decoding.switch_penalty) if decoding.viterbi else None)
-    min_duration = (OmegaConf.to_container(decoding.min_duration, resolve=True)
-                    if decoding.enforce_min else None)
+    decoding = OmegaConf.to_container(cfg.training.decoding, resolve=True)
+    # The same table the run decoded with - scoring under a different one would measure a
+    # model nobody trained.
+    source = str(cfg.data.labels.source) if "data" in cfg else ALGORITHM
+    cost = (transition_matrix(allowed_for(decoding, source), decoding["switch_penalty"])
+            if decoding["viterbi"] else None)
+    min_duration = decoding["min_duration"] if decoding["enforce_min"] else None
     fps = float(np.median(reference["fps"]))
     event_iou = float(cfg.training.event_iou)
 
