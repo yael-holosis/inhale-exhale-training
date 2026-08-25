@@ -489,3 +489,66 @@ def scaling_report(scaling, out_path: str | Path, plot_cfg: Mapping[str, Any] | 
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+# ------------------------------------------------------------------- raw against decoded
+
+def decoding_report(table, out_path: str | Path,
+                    plot_cfg: Mapping[str, Any] | None = None,
+                    raw: str = "raw", decoded: str = "viterbi") -> Path:
+    """What the decoder changed, metric by metric.
+
+    Both bars come from the **same logits** - the decoder is post-processing, so the network is
+    identical in each and the difference is the decoding alone. Drawn whether it helped or not:
+    a post-processing step that costs accuracy should be as visible as one that earns it.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    splits = split_colors_of(dict(plot_cfg or {}))
+
+    keep = [m for m in ("macro_f1", "accuracy", *[f"f1_{n}" for n in PHASES],
+                        *[f"event_f1_{n}" for n in PHASES]) if m in set(table["metric"])]
+    part = table[table.metric.isin(keep)].set_index("metric").loc[keep]
+
+    y = np.arange(len(part))
+    height = 0.34 * len(part) + 1.8
+    fig, (bars, delta) = plt.subplots(
+        1, 2, figsize=(11, height), facecolor=SURFACE,
+        gridspec_kw={"width_ratios": [1.5, 1.0], "wspace": 0.08}, sharey=True)
+
+    bars.barh(y - 0.19, part[raw], height=0.36, color="#b6b4b0", linewidth=0, label="argmax")
+    bars.barh(y + 0.19, part[decoded], height=0.36, color=splits[TEST], linewidth=0,
+              label="after viterbi")
+    bars.set_yticks(y, list(part.index), fontsize=7.5)
+    bars.invert_yaxis()
+    bars.set_xlim(0, 1)
+    bars.set_xlabel("score", fontsize=8, color=INK_SOFT)
+    bars.legend(frameon=False, fontsize=7.5, labelcolor=INK_SOFT, loc="lower right")
+    bars.set_title("same logits, decoded and not", fontsize=8.5, color=INK, loc="left", pad=6)
+
+    widest = float(np.abs(part["delta"]).max()) or 0.01
+    delta.barh(y, part["delta"], height=0.5, linewidth=0,
+               color=["#2e7d5b" if v >= 0 else "#c0392b" for v in part["delta"]])
+    for position, value in zip(y, part["delta"]):
+        delta.text(value + (0.04 * widest if value >= 0 else -0.04 * widest), position,
+                   f"{value:+.3f}", va="center",
+                   ha="left" if value >= 0 else "right", fontsize=7, color=INK_SOFT)
+    delta.axvline(0, color=INK_SOFT, linewidth=1.0)
+    delta.set_xlim(-widest * 1.6, widest * 1.6)
+    delta.set_xlabel("viterbi - argmax", fontsize=8, color=INK_SOFT)
+    delta.set_title("what the decoder was worth", fontsize=8.5, color=INK, loc="left", pad=6)
+
+    for ax in (bars, delta):
+        ax.grid(axis="x", color=GRID, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+        for side in ("top", "right", "left"):
+            ax.spines[side].set_visible(False)
+        ax.spines["bottom"].set_color(GRID)
+
+    fig.suptitle("post-processing: Viterbi over the network's own output", fontsize=10.5,
+                 color=INK, x=0.008, ha="left", y=0.995)
+    fig.subplots_adjust(left=0.16, right=0.985, top=1 - 0.5 / height, bottom=0.55 / height)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path

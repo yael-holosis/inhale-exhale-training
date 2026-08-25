@@ -240,9 +240,18 @@ def bootstrap(windows, patients: np.ndarray, cost, min_duration, fps: float, eve
         else (float("nan"), float("nan"))
 
 
+RAW = "raw"
+DECODED = "viterbi"
+
+
 def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
               per_page: int = 8) -> dict | None:
-    """Pool every fold under `runs`. Returns the ensemble metrics, or None if there are none."""
+    """Pool every fold under `runs`, scored **twice** - once on the network's own argmax and once
+    through the decoder - so what the post-processing is worth is visible rather than assumed.
+
+    The decoder is post-processing, nothing more: the same saved logits are scored both ways, and
+    the network is identical in each. Returns the decoded metrics, which are the ones to quote.
+    """
     runs = Path(runs)
     out_dir = Path(out_dir) if out_dir else runs
     folds = [load_fold(d) for d in sorted(runs.iterdir())
@@ -273,6 +282,25 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
     min_duration = decoding["min_duration"] if decoding["enforce_min"] else None
     fps = float(np.median(reference["fps"]))
     event_iou = float(cfg.training.event_iou)
+    plot_cfg = OmegaConf.to_container(cfg.plot, resolve=True)
+
+    both = {}
+    for label, (this_cost, this_min) in ((RAW, (None, None)),
+                                         (DECODED, (cost, min_duration))):
+        both[label] = _report_one(label, out_dir / label, folds, this_cost, this_min,
+                                  fps, event_iou, draws, int(cfg.seed), plot_cfg, runs,
+                                  per_page)
+
+    _compare(both, out_dir, plot_cfg)
+    return both[DECODED]
+
+
+def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float,
+                event_iou: float, draws: int, seed: int, plot_cfg, runs: Path,
+                per_page: int) -> dict:
+    """One complete report - `cost=None` is the network's raw argmax, no transitions, no floors."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    reference = folds[0]
 
     # ---------------------------------------------------------------- per fold
     # Recomputed from each fold's own logits rather than read out of its test_metrics.csv: that
@@ -293,10 +321,10 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
 
     patients = ensemble["patient"]
     low, high = bootstrap(windows, patients, cost, min_duration, fps, event_iou,
-                          draws, int(cfg.seed))
+                          draws, seed)
 
     headline = per_fold[HEADLINE] if HEADLINE in per_fold else pd.Series(dtype=float)
-    print(f"\nper fold {HEADLINE}: "
+    print(f"\n[{label}] per fold {HEADLINE}: "
           + "  ".join(f"{name.replace('fold_', '')}={value:.2f}"
                       for name, value in headline.items()))
     if len(headline) > 1:
@@ -333,19 +361,39 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
               + (f" ({skipped} patient(s) carry no called phase)" if skipped else ""))
 
     # ---------------------------------------------------------------- figures
-    plot_cfg = OmegaConf.to_container(cfg.plot, resolve=True)
     figures.fold_report(per_fold, metrics, (low, high),
                         confusion(windows, cost, min_duration),
                         out_dir / "fold_report.png", plot_cfg, headline=HEADLINE)
     figures.patient_report(scored, metrics, out_dir / "per_patient.png", plot_cfg)
     figures.scaling_report(scaling, out_dir / "fold_scaling.png", plot_cfg, headline=HEADLINE)
-    pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration, plot_cfg,
-                              per_page)
-    if pages:
-        print(f"every test window: {len(pages)} pages in {out_dir / PAGES_DIR}")
-    print(f"\n{out_dir}/  (per_fold.csv, ensemble_metrics.csv, per_patient.csv, "
-          f"fold_scaling.csv, fold_report.png, per_patient.png, fold_scaling.png)")
+    if label == DECODED:
+        # Only once: the pages are the same windows either way, and the decoded answer is the
+        # one a reader is checking.
+        pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
+                                  plot_cfg, per_page)
+        if pages:
+            print(f"every test window: {len(pages)} pages in {out_dir / PAGES_DIR}")
+    print(f"  -> {out_dir}/")
     return metrics
+
+
+def _compare(both: dict, out_dir: Path, plot_cfg) -> None:
+    """What the decoder was worth, side by side. Written whether it helped or not."""
+    rows = []
+    for metric in sorted(set(both[RAW]) & set(both[DECODED])):
+        raw, decoded = both[RAW][metric], both[DECODED][metric]
+        rows.append({"metric": metric, RAW: raw, DECODED: decoded,
+                     "delta": decoded - raw})
+    table = pd.DataFrame(rows)
+    table.to_csv(out_dir / "raw_vs_viterbi.csv", index=False)
+
+    headline = table[table.metric == HEADLINE]
+    if len(headline):
+        row = headline.iloc[0]
+        print(f"\n{HEADLINE}: argmax {row[RAW]:.3f} -> viterbi {row[DECODED]:.3f} "
+              f"({row['delta']:+.3f})")
+    figures.decoding_report(table, out_dir / "raw_vs_viterbi.png", plot_cfg)
+    print(f"{out_dir}/  ({RAW}/, {DECODED}/, raw_vs_viterbi.csv, raw_vs_viterbi.png)")
 
 
 def main() -> int:

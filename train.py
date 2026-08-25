@@ -240,16 +240,26 @@ def main(cfg: DictConfig) -> None:
         aggregate(run_dir, run_dir)
         if task is not None:
             # The aggregate is the result; it belongs on the task rather than only on disk.
-            for name in ("fold_report", "per_patient"):
-                figure = run_dir / f"{name}.png"
-                if figure.exists():
-                    task.get_logger().report_image("aggregate", name, iteration=0,
-                                                   local_path=str(figure),
-                                                   max_image_history=1)
-            for name in ("per_fold", "ensemble_metrics", "per_patient"):
-                table = run_dir / f"{name}.csv"
-                if table.exists():
-                    task.upload_artifact(name, artifact_object=str(table))
+            # Both passes go up: `raw` is the network alone, `viterbi` is after post-processing,
+            # and the comparison is what says whether the post-processing earned its place.
+            logger = task.get_logger()
+            for pass_name in ("raw", "viterbi"):
+                for name in ("fold_report", "per_patient", "fold_scaling"):
+                    figure = run_dir / pass_name / f"{name}.png"
+                    if figure.exists():
+                        logger.report_image(f"aggregate - {pass_name}", name, iteration=0,
+                                            local_path=str(figure), max_image_history=1)
+                for name in ("per_fold", "ensemble_metrics", "per_patient", "fold_scaling"):
+                    table = run_dir / pass_name / f"{name}.csv"
+                    if table.exists():
+                        task.upload_artifact(f"{pass_name}_{name}", artifact_object=str(table))
+            comparison = run_dir / "raw_vs_viterbi.png"
+            if comparison.exists():
+                logger.report_image("aggregate", "raw_vs_viterbi", iteration=0,
+                                    local_path=str(comparison), max_image_history=1)
+            if (run_dir / "raw_vs_viterbi.csv").exists():
+                task.upload_artifact("raw_vs_viterbi",
+                                     artifact_object=str(run_dir / "raw_vs_viterbi.csv"))
 
 
 if __name__ == "__main__":

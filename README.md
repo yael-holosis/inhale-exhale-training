@@ -4,10 +4,10 @@ Train a per-sample **inhale / exhale / stop / unknown** segmenter on radar respi
 waveforms, at 10 fps, any length in and one class per sample out. Small enough for the edge
 device: 18,188 parameters at the default shape.
 
-The training set is **the production algorithm's own output** over the windows already stored in
-`RespirationWindow`. Human labelling is under way but still small - a few dozen windows out of
-several thousand - so the network starts by learning what the device already does, and moves onto
-human labels as they arrive.
+Two label sources. **`algorithm`** is the production detector's own output over every stored
+window - imitation, and what there is most of. **`human`** is the spans a person drew: 603 windows
+over 35 patients as of 2026-08-24, and the only thing that measures correctness. The human set is
+now large enough to train on directly, which is what the current runs do.
 
 **This repo is standalone.** It reads two databases and an S3 bucket, and calls
 `holosissystem`'s own phase function. It imports no sibling checkout, writes nothing anywhere,
@@ -126,7 +126,7 @@ already on disk can never be stale.
 | | `algorithm` | `human` |
 | --- | --- | --- |
 | What | production's own `calculate_inhale_exhale_time`, re-run on the stored window | `BreathPhaseTimeRecord` - the spans a person drew |
-| How much | every window (2,848 today) | a few dozen |
+| How much | every window | 603 windows, 35 patients (2026-08-24) |
 | What it measures | imitation of the current algorithm | correctness |
 
 `algorithm` is what there is enough of to train on, and it is **distillation**: the ceiling is the
@@ -228,6 +228,29 @@ A server that does not answer downgrades the run to local logging rather than ki
 | Ronneberger, Fischer, Brox, **"U-Net: Convolutional Networks for Biomedical Image Segmentation"**, MICCAI 2015 — [arXiv:1505.04597](https://arxiv.org/abs/1505.04597) | The original, for the skip-connection idea the whole family rests on. |
 | Bai, Kolter, Koltun, **"An Empirical Evaluation of Generic Convolutional and Recurrent Networks for Sequence Modeling"**, 2018 — [arXiv:1803.01271](https://arxiv.org/abs/1803.01271) | The dilated TCN, the alternative below if the device ever needs causal streaming. |
 
+### Where the decoding comes from
+
+**U-Time itself does not decode** - it takes per-sample argmax - and no published work pairs a
+1-D U-Net with Viterbi for *respiration phase* specifically. The pattern itself is established
+though: the first two papers below are a 1-D CNN and an HMM decoded by Viterbi, doing exactly
+this job on a neighbouring problem.
+
+| Reference | What it supports |
+| --- | --- |
+| Yang, Wu, Wang, Bao, Wang, **"A single-channel EEG based automatic sleep stage classification method leveraging deep one-dimensional convolutional neural network and hidden Markov model"**, Biomedical Signal Processing and Control 68:102581, 2021 — [doi:10.1016/j.bspc.2021.102581](https://doi.org/10.1016/j.bspc.2021.102581) | **The closest published precedent.** A 1-D CNN classifies each epoch, then "HMM works as a post-processing step to correct the sleep stage sequence output from 1D-CNN, thereby correcting unreasonable sleep stage transitions" - the same architecture and the same division of labour as here. Reported as the first pairing of a 1-D CNN with an HMM for sleep staging. |
+| Pan, Kuo, Zeng, Liang, **"A transition-constrained discrete hidden Markov model for automatic sleep staging"**, BioMedical Engineering OnLine 11:52, 2012 — [doi:10.1186/1475-925X-11-52](https://doi.org/10.1186/1475-925X-11-52) | **The `allowed` table, published.** "To rule out impossible sleep stage transitions, the a<sub>ij</sub> corresponding to the impossible transition was set to zero according to the sleep stage transition diagram", decoded with Viterbi. That is precisely what `decoding.allowed` does - and, like ours, their transitions are read off the label set rather than learned. |
+| Viterbi, **"Error bounds for convolutional codes and an asymptotically optimum decoding algorithm"**, IEEE Trans. Information Theory 13(2), 1967 — [doi:10.1109/TIT.1967.1054010](https://doi.org/10.1109/TIT.1967.1054010) | The algorithm itself. Exact MAP inference over a first-order chain in O(T·K²) - the globally best label sequence, not a locally smoothed argmax. |
+| Rabiner, **"A Tutorial on Hidden Markov Models and Selected Applications in Speech Recognition"**, Proc. IEEE 77(2), 1989 — [doi:10.1109/5.18626](https://doi.org/10.1109/5.18626) | Why decoding a sequence beats per-frame argmax, and what a transition matrix is doing. |
+| Hinton, Deng, Yu, Dahl, Mohamed, Jaitly, Senior, Vanhoucke, Nguyen, Sainath, Kingsbury, **"Deep Neural Networks for Acoustic Modeling in Speech Recognition"**, IEEE Signal Processing Magazine 29(6), 2012 — [doi:10.1109/MSP.2012.2205597](https://doi.org/10.1109/MSP.2012.2205597) | The hybrid shape used here: a neural net supplies emissions, an HMM supplies transitions, decoding is separate from training. |
+| Lafferty, McCallum, Pereira, **"Conditional Random Fields: Probabilistic Models for Segmenting and Labeling Sequence Data"**, ICML 2001 | The structured-prediction framing, and the principled upgrade - see the caveat below. |
+| Huang, Xu, Yu, **"Bidirectional LSTM-CRF Models for Sequence Tagging"**, 2015 — [arXiv:1508.01991](https://arxiv.org/abs/1508.01991) | The same architecture with **learned** transitions and a structured loss. |
+
+**The honest caveat.** Our transitions are hand-written and the loss is not structured, so the
+model is trained to be right per sample and then decoded under constraints it never saw. A wrong
+table cannot be corrected by the data - it can only be caught by eye, which is exactly how the
+`inhale -> exhale` omission was found. A CRF layer (learned transitions, CRF loss) would remove
+both problems and is the principled version of what is here.
+
 | Shape | Parameters | Receptive field |
 | --- | --- | --- |
 | `[16,24,32]` / 48 (**default**) | 18,188 | 353 samples, 35 s |
@@ -312,18 +335,68 @@ range profile rather than off breath shape, gated at |corr| >= 0.3. It is a phys
 exactly the decision above and it is deliberately left out of the first runs, so that the
 shape-alone question gets a clean answer before a second input muddies it.
 
-### Decoding
+### Decoding - post-processing, and measured as such
 
-Argmax will happily emit inhale, exhale, inhale over three samples. Two cheap passes run after
-it, both configured in `training.decoding` and both on the device's budget:
+**The decoder is not part of the network.** The loss is weighted cross-entropy plus soft Dice on
+raw logits; no gradient reaches the decoder, and training never sees it. It runs at inference and
+when scoring, over logits the network has already produced.
 
-- **Viterbi** over the four classes - impossible transitions cost infinity, staying is free.
+Argmax will happily emit inhale, exhale, inhale over three samples. Nothing in a lung does that,
+and one stray sample splits a breath into three in every event-level metric. Two cheap passes run
+after the network, both configured in `training.decoding` and both on the device's budget:
+
+- **Viterbi** over the four classes - impossible transitions cost infinity, staying is free, an
+  allowed change costs `switch_penalty`.
 - **Minimum duration** - a run shorter than its class's floor is absorbed into the longer
   neighbour.
 
-The allowed transitions are a claim about *this label set*, not about physiology:
-`inhale -> unknown -> exhale` is the normal path here and `inhale -> exhale` is not, because
-production emits no phase for the turn. **Re-derive them if the labels ever come from people.**
+**Every run reports both ways.** `report_folds.py` scores the same saved logits twice - once on
+the network's own argmax, once decoded - and writes `raw/`, `viterbi/` and a `raw_vs_viterbi`
+comparison, all of which go to ClearML. Whether the post-processing earns its place is therefore
+a measurement in each run rather than an assumption.
+
+#### What it is currently worth
+
+Measured on the human set (603 windows, 132 held out over 11 patients, 5-fold ensemble,
+2026-08-25):
+
+| | argmax | after Viterbi | |
+| --- | --- | --- | --- |
+| macro F1 | 0.870 | 0.865 | **-0.004** |
+| accuracy | 0.889 | 0.883 | -0.006 |
+| f1 unknown | 0.923 | 0.912 | -0.011 |
+| f1 exhale | 0.877 | 0.869 | -0.009 |
+| f1 stop | 0.776 | 0.778 | +0.003 |
+| event F1 inhale | 0.680 | 0.685 | **+0.005** |
+| event F1 stop | 0.532 | 0.537 | **+0.005** |
+| event F1 exhale | 0.673 | 0.675 | +0.002 |
+| event F1 unknown | 0.329 | 0.297 | -0.031 |
+
+**It costs per-sample agreement and buys per-event agreement on the three called phases** - which
+is what it was built to do, since fragmentation is an event-level failure. On the headline
+per-sample macro F1 it is a small net loss. Whether to keep it is therefore a question about
+which failure matters: a breath split in two scores well per sample and fails as an event.
+
+`event_f1_unknown` falls the most (-0.031) and is the one class where that is expected - the
+minimum-duration floor absorbs the short `unknown` runs that human labelling leaves between
+partially-labelled stretches.
+
+Turning it off is `training.decoding.viterbi: false`.
+
+#### The transition table is per label source
+
+The allowed transitions are a claim about *the label set*, not about physiology, so there is one
+table per source in `training.decoding.allowed`:
+
+- **`algorithm`** - production emits no phase for the turn, so `inhale -> unknown -> exhale` is
+  the normal path and `inhale -> exhale` does not occur.
+- **`human`** - people draw the phases touching. Measured over 7,713 span transitions in the
+  human set: `inhale -> exhale` 33.3%, `stop -> inhale` 30.0%, `exhale -> stop` 29.9%,
+  `exhale -> inhale` 2.2%, everything touching `unknown` under 2%.
+
+Using the algorithm table on human labels forbids the commonest transition there is, and Viterbi
+bridges it with a one-sample `unknown` on **every breath** - an artefact of the table, not of the
+model. That is what a wrong table looks like, and it is why the source picks the table.
 
 ## Looking at the test set
 
