@@ -23,9 +23,7 @@ labels:
   labeler_id: null
   # human only. Labellers to drop, by LabelerName.ID. Their spans are excluded from the target
   # AND from the labelled count, so a window only they labelled is not kept empty.
-  #   7 - Sahar. Windows she labelled carry mistakes; all 26 are hers alone, so they leave the
-  #       set entirely rather than falling back to a second reading.
-  exclude_labeler_ids: [7]
+  exclude_labeler_ids: []
   # human only, where two people labelled one window: latest | lowest_id.
   on_conflict: latest
   # Off. The labelling app draws the blob as stored and the spans were drawn on that view, so
