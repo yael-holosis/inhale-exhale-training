@@ -69,6 +69,8 @@ from phase.labels import PHASES
 from phase.labelsources import SOURCES, LabelSource
 
 CONFIG_DIR = Path(__file__).parent / "parameter"
+# Above this share of failed signals the build is partial, not merely small.
+FAILURE_LIMIT = 0.05
 
 
 def load_config():
@@ -200,10 +202,19 @@ def main() -> int:
     for name in PHASES:
         share = 100 * facts["per_class"][name] / facts["samples"]
         print(f"  {name:8s} {facts['per_class'][name]:9,d}  {share:5.1f}%")
-    if stats.signals_failed:
-        print(f"\n{stats.signals_failed} signals failed - first few:")
+    if failed:
+        print(f"\n{failed} signals failed - first few:")
         for line in stats.failures[:5]:
             print(f"  {line}")
+    # A build that lost a large share of its signals is a partial dataset, not a small one, and
+    # exiting 0 lets it flow into training as though it were complete. Credentials expiring
+    # mid-download is the way this actually happens.
+    planned = built + failed
+    if planned and failed / planned > FAILURE_LIMIT:
+        print(f"\nREFUSING: {failed} of {planned} signals failed "
+              f"({100 * failed / planned:.0f}%, limit {100 * FAILURE_LIMIT:.0f}%). "
+              f"{out_dir} is partial - fix the cause and build again.")
+        return 2
     print(f"\n{out_dir}/  ({WINDOWS_NAME}, {PARAMS_NAME}, {STATS_NAME})")
     print(f"next: poetry run python make_splits.py --dataset {out_dir}")
     return 0
