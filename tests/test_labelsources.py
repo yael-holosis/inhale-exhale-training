@@ -61,3 +61,23 @@ def test_the_dataset_records_the_choice_for_either_source(which):
     described = LabelSource("ds_algo", {"source": which,
                                         "orient_by_reviewer_flip": True}).describe()
     assert described["orient_by_reviewer_flip"] is True
+
+
+def test_excluded_labellers_are_read_from_config_and_recorded():
+    """`build_params.yaml` has to say who was dropped, or the dataset cannot be reproduced."""
+    described = LabelSource("ds_algo", {"source": HUMAN,
+                                        "exclude_labeler_ids": [7]}).describe()
+    assert described["exclude_labeler_ids"] == [7]
+    # Absent means nobody excluded, not a crash on None.
+    assert LabelSource("ds_algo", {"source": HUMAN}).exclude_labeler_ids == []
+
+
+def test_the_exclusion_sql_drops_only_the_named_labellers():
+    from phase.sources import _not_labeller
+
+    assert _not_labeller(None) == ""
+    assert _not_labeller([]) == ""
+    assert _not_labeller([7]) == " AND r.LabelerID NOT IN (7)"
+    assert _not_labeller([7, 8]) == " AND r.LabelerID NOT IN (7, 8)"
+    # Ints, so a value from YAML cannot carry SQL through.
+    assert _not_labeller(["7"]) == " AND r.LabelerID NOT IN (7)"

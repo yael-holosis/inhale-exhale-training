@@ -124,9 +124,9 @@ def existing_params(directory: Path) -> dict[str, Any]:
 
 # --------------------------------------------------------------------------------- selection
 
-def catalogue(env_key: str) -> pd.DataFrame:
+def catalogue(env_key: str, exclude_labeler_ids=None) -> pd.DataFrame:
     """Every uploaded window with its signal and patient. See `phase.sources.catalogue`."""
-    return sources.catalogue(env_key)
+    return sources.catalogue(env_key, exclude_labeler_ids)
 
 
 def select(frame: pd.DataFrame, patients: list[str] | None = None,
@@ -276,8 +276,8 @@ def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] 
     shards_dir = out_dir / SHARDS_DIR
     shards_dir.mkdir(parents=True, exist_ok=True)
 
-    chosen = labels.eligible(select(catalogue(env_key), patients, signals,
-                                    per_patient, seed, exclude_patients))
+    chosen = labels.eligible(select(catalogue(env_key, labels.exclude_labeler_ids),
+                                    patients, signals, per_patient, seed, exclude_patients))
     if chosen.empty:
         log(f"no window on {env_key} matches that selection and can be labelled by "
             f"`{labels.source}`")

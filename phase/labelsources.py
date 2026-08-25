@@ -43,6 +43,7 @@ class LabelSource:
         if self.source not in SOURCES:
             raise ValueError(f"labels.source must be one of {SOURCES}, got {self.source!r}")
         self.labeler_id = cfg.get("labeler_id")
+        self.exclude_labeler_ids = [int(v) for v in (cfg.get("exclude_labeler_ids") or [])]
         self.on_conflict = str(cfg.get("on_conflict", LATEST))
         if self.on_conflict not in CONFLICT_RULES:
             raise ValueError(f"labels.on_conflict must be one of {CONFLICT_RULES}")
@@ -61,6 +62,7 @@ class LabelSource:
             out["holosissystem"] = production.version()
         else:
             out["labeler_id"] = self.labeler_id
+            out["exclude_labeler_ids"] = self.exclude_labeler_ids
             out["on_conflict"] = self.on_conflict
         return out
 
@@ -97,9 +99,11 @@ class LabelSource:
         return self._human_rows(row)
 
     def _human_rows(self, row: pd.Series) -> tuple[list[dict[str, Any]], str]:
-        spans = sources.human_spans(self.env_key, int(row["ID"]))
+        spans = sources.human_spans(self.env_key, int(row["ID"]),
+                                    self.exclude_labeler_ids)
         if spans.empty:
-            return [], "nobody has labelled this window"
+            return [], ("nobody has labelled this window" if not self.exclude_labeler_ids
+                        else "no labelling left once the excluded labellers are dropped")
         if self.labeler_id is not None:
             spans = spans[spans["LabelerID"] == int(self.labeler_id)]
             if spans.empty:

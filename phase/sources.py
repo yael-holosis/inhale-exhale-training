@@ -181,14 +181,27 @@ def frame(env_key: str, role: str, query: str, **binds) -> pd.DataFrame:
 
 # ------------------------------------------------------------------------------- the catalogue
 
-def windows_frame(env_key: str) -> pd.DataFrame:
+def _not_labeller(exclude_labeler_ids, alias: str = "r") -> str:
+    """SQL that drops the excluded labellers, or nothing at all if there are none."""
+    if not exclude_labeler_ids:
+        return ""
+    ids = ", ".join(str(int(value)) for value in exclude_labeler_ids)
+    return f" AND {alias}.LabelerID NOT IN ({ids})"
+
+
+def windows_frame(env_key: str, exclude_labeler_ids=None) -> pd.DataFrame:
     """Every uploaded window with its human-span counts. Labels side only.
 
     `Spans` is the number of `BreathPhaseTimeRecord` rows on the window - the only thing that
     says whether a person has labelled it. There is no boolean "labelled" column, and filtering
     on one that is not there silently keeps every row.
+
+    **The excluded labellers are dropped from the count, not just from the spans.** A window only
+    they labelled would otherwise pass a `Spans > 0` filter and then arrive with no target -
+    kept, empty, and counted as labelled.
     """
     t = config()["tables"]
+    dropped = _not_labeller(exclude_labeler_ids)
     return frame(env_key, LABELS, f"""
         SELECT w.ID, w.RadarSignalID, w.WindowIndex, w.WaveformS3Path,
                w.StartIndex, w.EndIndex, w.AnalysisFps, w.RespirationRate, w.RangeBin,
@@ -196,7 +209,7 @@ def windows_frame(env_key: str) -> pd.DataFrame:
                COUNT(r.ID)                 AS Spans,
                COUNT(DISTINCT r.LabelerID) AS Labelers
         FROM {t['window']} w
-          LEFT JOIN {t['phase_record']} r ON r.RespirationWindowID = w.ID
+          LEFT JOIN {t['phase_record']} r ON r.RespirationWindowID = w.ID{dropped}
         GROUP BY w.ID
         ORDER BY w.RadarSignalID, w.WindowIndex
     """)
@@ -246,13 +259,13 @@ def signals_frame(env_key: str, signal_ids: list[int]) -> pd.DataFrame:
     return found.drop(columns=["PatientName"])
 
 
-def catalogue(env_key: str) -> pd.DataFrame:
+def catalogue(env_key: str, exclude_labeler_ids=None) -> pd.DataFrame:
     """Windows merged with their signal and patient. One row per window.
 
     This merge **is** the association between a stored window and where it came from, and it
     happens in pandas rather than SQL because on prod the two sides are different servers.
     """
-    windows = windows_frame(env_key)
+    windows = windows_frame(env_key, exclude_labeler_ids)
     if windows.empty:
         for column in ("SessionID", "StartTime", "Fps", "PatientKey", "Patient"):
             windows[column] = None
@@ -269,7 +282,7 @@ def phase_vocabulary(env_key: str) -> dict[int, str]:
     return {int(row.ID): str(row.Name).lower() for row in rows.itertuples()}
 
 
-def human_spans(env_key: str, window_id: int) -> pd.DataFrame:
+def human_spans(env_key: str, window_id: int, exclude_labeler_ids=None) -> pd.DataFrame:
     """Every labelled span on one window, whoever made it.
 
     Note `EndIndex` here is **inclusive** - adjacent spans share a boundary sample - while a
@@ -280,7 +293,7 @@ def human_spans(env_key: str, window_id: int) -> pd.DataFrame:
         SELECT r.ID, r.RespirationWindowID, r.BreathPhaseTypeID, r.StartIndex, r.EndIndex,
                r.LabelerID, r.RecordCreationTime
         FROM {t['phase_record']} r
-        WHERE r.RespirationWindowID = %(window)s
+        WHERE r.RespirationWindowID = %(window)s{_not_labeller(exclude_labeler_ids)}
         ORDER BY r.LabelerID, r.StartIndex
     """, window=int(window_id))
 
