@@ -161,6 +161,53 @@ directory would train a model against a moving definition. Override per run with
 "nobody looked at this" and "somebody looked and could not call it" are different facts, and the
 labelling rule already writes the second one down as `unknown`.
 
+### Taking the labelling at less than its word
+
+`data.labels.corrections` rewrites the target before it reaches a shard, so it is what the network
+is trained on, what it is scored against, and what every figure draws. Both are off by default.
+
+| | What it does | Why |
+| --- | --- | --- |
+| `blank_edge_spans` | a labelled span that runs to the window boundary becomes `unknown`, whole | the boundary cut that breath, and whether a labeller marks the fragment it leaves is inconsistent |
+| `all_unknown_above` | a window more than that fraction `unknown` becomes entirely `unknown` | a window that is mostly uncallable should not claim the phases it does have |
+
+The fraction is measured **after** the edge spans are blanked - blanking them adds `unknown`, so
+it can be what pushes a window over.
+
+**Touching the boundary is the whole test.** Where a window opens or closes with `unknown` the
+labeller looked at that stretch and declined it, so nothing there was truncated and the phase
+beside it is left as drawn. 78% of windows start with a phase at sample 0 and 77% end with one;
+65 labelled windows are untouched by this entirely.
+
+What each setting costs on the 1,081-window human set:
+
+| `blank_edge_spans` | `all_unknown_above` | `unknown` | windows entirely unknown |
+| --- | --- | --- | --- |
+| off | off | 25.9% | 155 |
+| off | 0.5 | 27.3% | 193 |
+| on | off | 32.1% | 155 |
+| on | 0.5 | 33.9% | 202 |
+
+Blanking takes 8.4% of the labelled samples.
+
+**A score measured under one setting cannot be compared with one measured under another.** Both
+corrections move samples into `unknown`, which is the easy class, so the headline rises without
+the model improving.
+
+Each shard keeps the labelling **as drawn** next to the corrected target, so a new setting is
+derived from an existing dataset rather than rebuilt:
+
+```bash
+poetry run python build_dataset.py --recorrect latest \
+    data.labels.corrections.blank_edge_spans=true \
+    data.labels.corrections.all_unknown_above=0.5
+```
+
+That writes a new dataset directory in about two seconds and carries the split columns across -
+the windows and the patients did not move, only the target. A rebuild from the database costs a
+round-trip per window, about twelve minutes on the current set. Any trailing `key=value` argument
+overrides the config tree the same way.
+
 ## Splits
 
 `make_splits.py` writes them into the dataset's own `windows.csv`, so the record of which window

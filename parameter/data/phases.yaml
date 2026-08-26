@@ -33,6 +33,19 @@ labels:
   # the set towards easy breathing. human ignores this.
   requires_rate: true
 
+  # Applied to the per-sample target before it reaches a shard, so this is what the network sees
+  # and what every figure reads back. The labelling as drawn stays in the shard, so
+  # `build_dataset.py --recorrect` re-derives a dataset under new values without the database.
+  corrections:
+    # A labelled span that runs to the window boundary becomes unknown, whole: the boundary cut
+    # that breath and whether a labeller marks the fragment is inconsistent. Only a span actually
+    # touching an edge - a window opening with unknown was already read that way. Costs 8.4% of
+    # the labelled samples.
+    blank_edge_spans: false
+    # A window more than this fraction unknown - measured after the edge spans - becomes entirely
+    # unknown. It stays in the set; it just stops claiming phases. Null disables.
+    all_unknown_above: null
+
 # Written into the dataset by make_splits.py, never recomputed at train time.
 split:
   test_fraction: 0.2

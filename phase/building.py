@@ -195,7 +195,9 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource,
     """One signal's stored windows, each with its samples and its per-sample target.
 
     Orientation is `LabelSource.orient`, off by default, and runs before the labels so both
-    sources describe the same trace.
+    sources describe the same trace. `LabelSource.corrections` then rewrites the target - a span
+    the window boundary cut to unknown, a mostly-unknown window to all unknown - so the shard
+    holds what the network is given rather than the labelling as drawn.
 
     A window the source cannot label is **kept**, empty, and counted - except under `human`,
     where `eligible` has already removed the unlabelled ones. "The algorithm found nothing here"
@@ -209,6 +211,10 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource,
             continue
         values = labels.orient(row, values)
         spans, note = labels.rows_for(row, values)
+        drawn = spans_to_targets(spans, values.size)
+        target, forced = labels.corrections.apply(drawn)
+        if forced:
+            note = f"{note}; forced entirely unknown by labels.corrections"
         out.append({
             "window_id": int(row["ID"]),
             "window_index": int(row["WindowIndex"]),
@@ -222,7 +228,7 @@ def windows_of_signal(rows: pd.DataFrame, labels: LabelSource,
                                else str(row["SystemVersion"])),
             "human_spans": int(row.get("Spans", 0) or 0),
             "spans": spans, "note": note, "values": values,
-            "target": spans_to_targets(spans, values.size),
+            "target": target, "target_drawn": drawn, "forced_unknown": forced,
         })
     return out
 
@@ -233,11 +239,17 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
 
     Ragged on purpose - windows differ in length, and padding them to a common width would put
     invented samples in the training set.
+
+    `targets` is what the network is given; `targets_drawn` is the labelling before
+    `labels.corrections` touched it. Identical where no correction is configured.
     """
     lengths = np.array([window["values"].size for window in windows], dtype=np.int64)
     return {
         "values": np.concatenate([w["values"] for w in windows]).astype(np.float32),
         "targets": np.concatenate([w["target"] for w in windows]).astype(np.int8),
+        # The labelling as drawn, kept so `--recorrect` can re-derive a dataset under different
+        # corrections without going back to the database. One byte a sample.
+        "targets_drawn": np.concatenate([w["target_drawn"] for w in windows]).astype(np.int8),
         "offsets": np.concatenate(([0], np.cumsum(lengths))).astype(np.int64),
         "window_id": np.array([w["window_id"] for w in windows], dtype=np.int64),
         "window_index": np.array([w["window_index"] for w in windows], dtype=np.int64),
@@ -250,6 +262,7 @@ def _shard_arrays(env_key: str, signal_id: int, patient: str, patient_key: str,
                                for w in windows], dtype=np.int64),
         "reviewer_flipped": np.array([w["reviewer_flipped"] for w in windows], dtype=bool),
         "n_spans": np.array([len(w["spans"]) for w in windows], dtype=np.int64),
+        "forced_unknown": np.array([w["forced_unknown"] for w in windows], dtype=bool),
         "human_spans": np.array([w["human_spans"] for w in windows], dtype=np.int64),
         "system_version": np.array([w["system_version"] for w in windows]),
         "signal_id": np.int64(signal_id),
@@ -329,6 +342,68 @@ def build(env_key: str, out_dir: Path, labels: LabelSource, patients: list[str] 
     return windows_frame, stats
 
 
+def recorrect(source_dir: Path, out_dir: Path, corrections, previous=None,
+              log=print) -> tuple[pd.DataFrame, int]:
+    """A new dataset from an existing one, under different `labels.corrections`.
+
+    Reads `targets_drawn` out of each shard and re-applies the corrections to it, so nothing is
+    fetched again - a rebuild from the database costs a round-trip per window. Split columns are
+    carried over because the windows and the patients are identical; only the target moved.
+
+    A shard built before `targets_drawn` existed still works when the dataset recorded no
+    corrections of its own - `targets` is then the labelling as drawn. `previous` is what the
+    source dataset was built under; where that had corrections on, the drawn target is genuinely
+    gone and a rebuild is the only honest answer.
+
+    Returns the new index and how many windows the corrections blanked.
+    """
+    source_dir, out_dir = Path(source_dir), Path(out_dir)
+    shards = sorted(source_dir.glob(f"{SHARDS_DIR}/*_signal_*.npz")) or \
+        sorted(source_dir.glob("*_signal_*.npz"))
+    if not shards:
+        raise FileNotFoundError(f"no shard under {source_dir}")
+    (out_dir / SHARDS_DIR).mkdir(parents=True, exist_ok=True)
+
+    forced_total = 0
+    for count, path in enumerate(shards, start=1):
+        with np.load(path, allow_pickle=False) as stored:
+            arrays = {name: stored[name] for name in stored.files}
+        if "targets_drawn" not in arrays:
+            if previous is not None and previous.enabled:
+                raise KeyError(
+                    f"{path.name} predates `targets_drawn` and was built with corrections "
+                    f"{previous.describe()} - the labelling as drawn is not recoverable from it. "
+                    "Rebuild from the database instead.")
+            if count == 1:
+                log("  shards predate `targets_drawn`; the dataset recorded no corrections, so "
+                    "its targets are the labelling as drawn")
+            arrays["targets_drawn"] = arrays["targets"]
+        offsets, drawn = arrays["offsets"], arrays["targets_drawn"].astype(np.int64)
+        targets, forced = [], []
+        for position in range(len(offsets) - 1):
+            piece, blanked = corrections.apply(drawn[offsets[position]:offsets[position + 1]])
+            targets.append(piece)
+            forced.append(blanked)
+        arrays["targets"] = np.concatenate(targets).astype(np.int8)
+        arrays["forced_unknown"] = np.array(forced, dtype=bool)
+        forced_total += int(sum(forced))
+        np.savez_compressed(out_dir / SHARDS_DIR / path.name, **arrays)
+        if count % 100 == 0 or count == len(shards):
+            log(f"  [{count}/{len(shards)}] shards re-corrected")
+
+    carried = source_dir / WINDOWS_NAME
+    if carried.exists():
+        # Written before `read_windows`, which merges the split columns off whatever is already
+        # there - the windows and the patients did not move, so their assignment must not either.
+        stored = pd.read_csv(carried)
+        keep = [c for c in stored.columns if c in ("env", "RespirationWindowID")
+                or c == "split" or c.endswith("_split")]
+        stored[keep].to_csv(out_dir / WINDOWS_NAME, index=False)
+    frame = read_windows(out_dir)
+    write_windows(out_dir, frame)
+    return frame, forced_total
+
+
 def write_windows(out_dir: Path, frame: pd.DataFrame) -> Path:
     path = Path(out_dir) / WINDOWS_NAME
     frame.to_csv(path, index=False)
@@ -403,6 +478,10 @@ def _rows_of_shard(stored, shard: str) -> list[dict[str, Any]]:
             "system_version": str(stored["system_version"][position]),
             "n_spans": labelled,
             "labelled": labelled > 0,
+            # `n_spans` records the labelling as drawn; this records that `labels.corrections`
+            # blanked the target anyway, which is what the network was given.
+            "forced_unknown": (bool(stored["forced_unknown"][position])
+                               if "forced_unknown" in stored else False),
             # A snapshot at build time, unlike every other column here: it counts the human spans
             # on this window when it was read, and labelling continues afterwards.
             "human_spans": int(stored["human_spans"][position])
@@ -426,6 +505,8 @@ def summarise(frame: pd.DataFrame) -> dict[str, Any]:
         "samples": samples,
         "hours": round(samples / 10.0 / 3600.0, 2),
         "windows_unlabelled": int((~frame["labelled"]).sum()),
+        "windows_forced_unknown": int(frame["forced_unknown"].sum())
+                                  if "forced_unknown" in frame else 0,
         "windows_with_human_spans": int((frame["human_spans"] > 0).sum()),
         "per_class": per_class,
         "per_class_fraction": {name: round(count / samples, 4)

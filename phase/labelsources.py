@@ -9,6 +9,9 @@ a per-sample target. Everything downstream is identical; only this file knows th
     amplitude crossings rather than phase durations, and it emits no phase for the turn from
     inhale to exhale - so `unknown` sits structurally at the crest of most breaths.
 
+`data.labels.corrections` then takes either source at less than its word - blanking a span the
+window boundary cut, blanking a window that is mostly unknown. See `phase.corrections`.
+
 `HUMAN` - `BreathPhaseTimeRecord`, the spans a person drew. The real target and the only thing
     that measures correctness, but only a few dozen windows carry one. A window nobody has
     labelled has no target at all and is skipped, not filled with `unknown` - "nobody looked at
@@ -24,6 +27,7 @@ import numpy as np
 import pandas as pd
 
 from phase import production, sources
+from phase.corrections import Corrections
 
 ALGORITHM = "algorithm"
 HUMAN = "human"
@@ -49,6 +53,8 @@ class LabelSource:
             raise ValueError(f"labels.on_conflict must be one of {CONFLICT_RULES}")
         self.requires_rate = bool(cfg.get("requires_rate", True))
         self.orient_by_reviewer_flip = bool(cfg.get("orient_by_reviewer_flip", False))
+        # Applied to the target, not to the spans: a correction is about what the net is given.
+        self.corrections = Corrections.from_config(cfg.get("corrections"))
         self._vocabulary: dict[int, str] | None = None
 
     # ------------------------------------------------------------------ description
@@ -56,7 +62,8 @@ class LabelSource:
     def describe(self) -> dict[str, Any]:
         """What went into `build_params.yaml`, so a dataset says how it was labelled."""
         out = {"source": self.source,
-               "orient_by_reviewer_flip": self.orient_by_reviewer_flip}
+               "orient_by_reviewer_flip": self.orient_by_reviewer_flip,
+               "corrections": self.corrections.describe()}
         if self.source == ALGORITHM:
             out["requires_rate"] = self.requires_rate
             out["holosissystem"] = production.version()

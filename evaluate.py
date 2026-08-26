@@ -46,7 +46,8 @@ from models.lightning_module import PhaseSegmenter
 from phase import figures, sources
 from phase.decode import decode
 from phase.labels import PHASES, UNKNOWN, spans_to_targets
-from phase.building import shard_path, load_windows, resolve
+from phase.building import existing_params, shard_path, load_windows, resolve
+from phase.corrections import Corrections
 from phase.metrics import event_level, per_sample, phase_durations
 from phase.splits import split_for
 
@@ -187,6 +188,8 @@ def on_human(args, cfg) -> int:
     """Every window in the dataset that also carries human spans, scored three ways."""
     root = dataset_of(cfg, args.dataset)
     manifest = load_windows(root)
+    corrections = Corrections.from_config(
+        existing_params(root).get("labels", {}).get("corrections"))
 
     rows = []
     for env, group in manifest.groupby("env"):
@@ -209,6 +212,9 @@ def on_human(args, cfg) -> int:
                 [{"phase": names[int(span["BreathPhaseTypeID"])],
                   "start": int(span["StartIndex"]), "end": int(span["EndIndex"]) + 1}
                  for span in spans.to_dict("records")], values.size)
+            # The same corrections the dataset was built under, or this scores the model on a
+            # target it was never trained against.
+            human, _ = corrections.apply(human)
             rows.append({"model": None, "values": values, "human": human, "teacher": teacher,
                          "fps": float(row["analysis_fps"]), "patient": row["PatientID"],
                          "window": f"{int(row['RadarSignalID'])}_w{int(row['WindowIndex'])}"})

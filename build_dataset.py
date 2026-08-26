@@ -51,6 +51,15 @@ Options
     and `ReviewerFlipped` are read from the database on every build regardless.
 
 `--catalogue`   Report what is uploaded on an instance and write nothing.
+
+Any remaining `key=value` argument is a Hydra-style override of the config tree, so a parameter
+can be swept without a flag of its own:
+`--recorrect latest data.labels.corrections.blank_edge_spans=true`.
+
+`--recorrect DIR`   Derive a new dataset from an existing one under the current
+    `data.labels.corrections`, re-applying them to the labelling each shard kept as drawn. No
+    database and no S3: a rebuild costs a round-trip per window, this costs a file copy. Split
+    columns are carried over, so `make_splits.py` does not have to run again.
 """
 
 from __future__ import annotations
@@ -63,8 +72,9 @@ from omegaconf import OmegaConf
 
 from phase import sources
 from phase.building import (PARAMS_NAME, STATS_NAME, WINDOWS_NAME, build, catalogue,
-                            dataset_dir, existing_params, resolve, stamp, summarise,
+                            dataset_dir, existing_params, recorrect, resolve, stamp, summarise,
                             write_provenance)
+from phase.corrections import Corrections
 from phase.labels import PHASES
 from phase.labelsources import SOURCES, LabelSource
 
@@ -106,7 +116,13 @@ def parse_args(cfg):
     parser.add_argument("--refresh-cache", action="store_true",
                         help="re-download every window instead of using the cache")
     parser.add_argument("--catalogue", action="store_true")
-    return parser.parse_args()
+    parser.add_argument("--recorrect", default=None, metavar="DIR",
+                        help="derive a new dataset from this one under the current "
+                             "data.labels.corrections, without reading the database")
+    # Anything left over is a Hydra-style override, so a parameter can be swept from the command
+    # line without a flag per key: data.labels.corrections.blank_edge_spans=true
+    args, overrides = parser.parse_known_args()
+    return args, [item for item in overrides if "=" in item]
 
 
 def show_catalogue(env_key: str) -> int:
@@ -139,9 +155,50 @@ def target_directory(args, cfg, source: str) -> Path:
     return directory
 
 
+def run_recorrect(args, cfg) -> int:
+    """A new dataset from an existing one under the current corrections. No AWS, no database."""
+    label_cfg = OmegaConf.to_container(cfg.data.labels, resolve=True)
+    if args.labels:
+        label_cfg["source"] = args.labels
+    source_dir = resolve(cfg.data.root, args.recorrect)
+    previous = existing_params(source_dir).get("labels", {})
+    source = previous.get("source") or LabelSource(args.env[0], label_cfg).source
+    labels = LabelSource(args.env[0], {**label_cfg, "source": source})
+    out_dir = dataset_dir(cfg.data.root, cfg.data.name, source)
+    print(f"re-correcting {source_dir}\n-> {out_dir}\n   {labels.corrections.describe()}")
+    if previous.get("corrections"):
+        print(f"   was {previous['corrections']}")
+
+    started = stamp()
+    frame, forced = recorrect(source_dir, out_dir, labels.corrections,
+                              previous=Corrections.from_config(previous.get("corrections")))
+    write_provenance(out_dir, {
+        "started": started, "finished": stamp(), "recorrected_from": str(source_dir),
+        "env": sorted(frame["env"].astype(str).unique()), "labels": labels.describe(),
+    }, frame)
+
+    facts = summarise(frame)
+    print(f"\n{facts['windows']} windows, {facts['samples']:,} samples, "
+          f"{forced} forced entirely unknown")
+    for name in PHASES:
+        share = 100 * facts["per_class"][name] / facts["samples"]
+        print(f"  {name:8s} {facts['per_class'][name]:9,d}  {share:5.1f}%")
+    print(f"\n{out_dir}/  ({WINDOWS_NAME}, {PARAMS_NAME}, {STATS_NAME})")
+    if [c for c in frame.columns if c == "split" or c.endswith("_split")]:
+        print(f"next: poetry run python train.py data.dir={out_dir.name}")
+    else:
+        print(f"next: poetry run python make_splits.py --dataset {out_dir}")
+    return 0
+
+
 def main() -> int:
     cfg = load_config()
-    args = parse_args(cfg)
+    args, overrides = parse_args(cfg)
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
+        print(f"overrides: {' '.join(overrides)}")
+    if args.recorrect:
+        return run_recorrect(args, cfg)
     if not sources.ensure_session():
         print(f"cannot reach AWS as {sources.profile()} - "
               f"run: aws sso login --profile {sources.profile()}")
