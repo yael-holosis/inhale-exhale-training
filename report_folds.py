@@ -39,7 +39,8 @@ from phase.building import load_windows, shard_path
 from phase.decode import decode, transition_matrix
 from phase.labels import N_CLASSES, PHASES, UNKNOWN
 from phase.labelsources import ALGORITHM
-from phase.metrics import event_level, per_sample
+from phase.metrics import (duration_agreement, duration_pairs, event_level,
+                           per_sample)
 from phase.splits import STUDY_COLUMN, study_of
 
 LOGITS_NAME = "test_logits.npz"
@@ -152,6 +153,11 @@ def traces_for(runs: Path, window_ids: np.ndarray,
     if named is None:
         return {}
     dataset = Path(named.read_text().strip())
+    if not dataset.is_absolute() and not dataset.exists():
+        # `dataset.txt` records the path as the run saw it, which is relative to the repo root.
+        # A caller running from anywhere else - a notebook, say - resolves it against its own
+        # directory and finds nothing, which reads as a deleted dataset rather than a bad path.
+        dataset = Path(__file__).resolve().parent / dataset
     if not dataset.exists():
         print(f"{dataset} is gone - cannot draw the windows")
         return {}
@@ -247,19 +253,38 @@ DECODED = "viterbi"
 HYDRA_CONFIG = Path(".hydra") / "config.yaml"
 
 
-def label_source_of(runs: Path) -> str:
-    """The label source the run actually used, off its own Hydra config.
+def config_of(runs: Path):
+    """The config a run was executed under, off its own Hydra output. None if it has none.
 
-    Not from `parameter/`: `OmegaConf.load` does not resolve Hydra's `defaults:`, so the merged
-    tree has no `data` at all and every run silently scored as `algorithm` - decoding human
-    labels under a table that forbids their commonest transition.
+    **Never read `parameter/` to describe a finished run.** That tree is what the next run will
+    use, and it moves - a decoding penalty, a transition table or a correction changed since the
+    run would silently rescore it under settings it never saw. `OmegaConf.load` does not resolve
+    Hydra's `defaults:` either, so the merged tree has no `data` at all.
     """
     for candidate in (runs / HYDRA_CONFIG, *(d / HYDRA_CONFIG for d in sorted(runs.iterdir())
                                              if d.is_dir())):
         if candidate.is_file():
-            found = OmegaConf.select(OmegaConf.load(candidate), "data.labels.source")
-            if found:
-                return str(found)
+            return OmegaConf.load(candidate)
+    return None
+
+
+def decoding_of(runs: Path) -> dict:
+    """`training.decoding` as the run had it - penalty, floors and the transition tables."""
+    cfg = config_of(runs)
+    found = None if cfg is None else OmegaConf.select(cfg, "training.decoding")
+    if found is None:
+        raise FileNotFoundError(
+            f"no .hydra config under {runs} - its decoding settings are not recoverable, and "
+            f"reading them from parameter/ would score it under settings it never saw")
+    return OmegaConf.to_container(found, resolve=True)
+
+
+def label_source_of(runs: Path) -> str:
+    """The label source the run actually used, off its own Hydra config."""
+    cfg = config_of(runs)
+    found = None if cfg is None else OmegaConf.select(cfg, "data.labels.source")
+    if found:
+        return str(found)
     print(f"no .hydra config under {runs} - assuming labels.source={ALGORITHM}")
     return ALGORITHM
 
@@ -388,6 +413,19 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
                         out_dir / "fold_report.png", plot_cfg, headline=HEADLINE)
     figures.patient_report(scored, metrics, out_dir / "per_patient.png", plot_cfg)
     figures.scaling_report(scaling, out_dir / "fold_scaling.png", plot_cfg, headline=HEADLINE)
+
+    # The durations are what the device reports, so agreement on them is the result rather than
+    # a diagnostic. Per window, over the windows where both sides called the phase at all.
+    pairs = [duration_pairs(decode(logits, cost, min_duration), truth, fps)
+             for logits, truth in windows]
+    agreement = duration_agreement(pairs)
+    pd.DataFrame(agreement).T.to_csv(out_dir / "duration_agreement.csv")
+    figures.duration_report(pairs, agreement, out_dir / "durations.png", plot_cfg)
+    for name, stats in agreement.items():
+        if stats.get("n"):
+            print(f"  {name:8s} bias {stats['bias_sec']:+.2f}s  MAE {stats['mae_sec']:.2f}s  "
+                  f"({stats['relative_mae']:.0%})  limits {stats['loa_low']:+.2f} to "
+                  f"{stats['loa_high']:+.2f}s  n={stats['n']}")
     # Both passes get their own pages: seeing the same window decoded and undecoded is how the
     # post-processing is judged by eye rather than only by a metric.
     pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
