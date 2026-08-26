@@ -393,42 +393,38 @@ and one stray sample splits a breath into three in every event-level metric. Two
 after the network, both configured in `training.decoding` and both on the device's budget:
 
 - **Viterbi** over the four classes - impossible transitions cost infinity, staying is free, an
-  allowed change costs `switch_penalty`.
+  allowed change costs `switch_penalty`. **On.**
 - **Minimum duration** - a run shorter than its class's floor is absorbed into the longer
-  neighbour.
+  neighbour. **Off** - see below.
 
-**Every run reports both ways.** `report_folds.py` scores the same saved logits twice - once on
-the network's own argmax, once decoded - and writes `raw/`, `viterbi/` and a `raw_vs_viterbi`
-comparison, all of which go to ClearML. Whether the post-processing earns its place is therefore
-a measurement in each run rather than an assumption.
+#### What each pass is worth
 
-#### What it is currently worth
+The two passes are independent and have to be measured apart. Scoring one run's saved logits four
+ways - 228 test windows, 15 held-out patients, 5-fold ensemble, run `14-36-33`:
 
-Measured on the human set (603 windows, 132 held out over 11 patients, 5-fold ensemble,
-2026-08-25):
+| | macro F1 | accuracy | spans / window | inhale MAE | exhale MAE | stop MAE |
+| --- | --- | --- | --- | --- | --- | --- |
+| argmax alone | 0.8487 | 0.8595 | 15.9 | 0.108 | 0.270 | 0.249 |
+| minimum duration only | 0.8484 | 0.8592 | 15.1 | 0.096 | 0.242 | 0.247 |
+| **Viterbi only** | **0.8500** | **0.8611** | 13.9 | **0.091** | **0.203** | 0.247 |
+| Viterbi + minimum duration | 0.8499 | 0.8610 | 13.8 | 0.091 | 0.203 | 0.250 |
 
-| | argmax | after Viterbi | |
-| --- | --- | --- | --- |
-| macro F1 | 0.870 | 0.865 | **-0.004** |
-| accuracy | 0.889 | 0.883 | -0.006 |
-| f1 unknown | 0.923 | 0.912 | -0.011 |
-| f1 exhale | 0.877 | 0.869 | -0.009 |
-| f1 stop | 0.776 | 0.778 | +0.003 |
-| event F1 inhale | 0.680 | 0.685 | **+0.005** |
-| event F1 stop | 0.532 | 0.537 | **+0.005** |
-| event F1 exhale | 0.673 | 0.675 | +0.002 |
-| event F1 unknown | 0.329 | 0.297 | -0.031 |
+**Viterbi does the work; the floors add nothing on top of it.** Alone the floors recover about half
+the duration gain, but Viterbi's transition cost already suppresses the flicker they exist to
+catch, so applied after it they move macro F1 by -0.0001 and make the stop duration slightly
+worse. They also carry a cost the transition table does not: a floor **deletes** a real short
+phase rather than smoothing it, and `stop: 2` forbids reporting any pause under 0.2 s against a
+labelled stop mean of 0.82 s.
 
-**It costs per-sample agreement and buys per-event agreement on the three called phases** - which
-is what it was built to do, since fragmentation is an event-level failure. On the headline
-per-sample macro F1 it is a small net loss. Whether to keep it is therefore a question about
-which failure matters: a breath split in two scores well per sample and fails as an event.
+So `enforce_min` is **off**. The pass is kept rather than deleted - it is the right tool if the
+transition table is ever turned off, and it is what a device without the table would need.
 
-`event_f1_unknown` falls the most (-0.031) and is the one class where that is expected - the
-minimum-duration floor absorbs the short `unknown` runs that human labelling leaves between
-partially-labelled stretches.
+Reported the same way in every run: `report_folds.py` scores the same logits twice, once on the
+network's argmax and once decoded, and writes `raw/`, `viterbi/` and a `raw_vs_viterbi`
+comparison, all of which go to ClearML. With `enforce_min: false`, `viterbi/` is now the
+transition model alone, so the comparison isolates one thing.
 
-Turning it off is `training.decoding.viterbi: false`.
+Turning the transition model off too is `training.decoding.viterbi: false`.
 
 #### The transition table is per label source
 

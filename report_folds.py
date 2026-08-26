@@ -290,7 +290,8 @@ def label_source_of(runs: Path) -> str:
 
 
 def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
-              per_page: int = 8, label_source: str | None = None) -> dict | None:
+              per_page: int = 8, label_source: str | None = None,
+              enforce_min: bool | None = None) -> dict | None:
     """Pool every fold under `runs`, scored **twice** - once on the network's own argmax and once
     through the decoder - so what the post-processing is worth is visible rather than assumed.
 
@@ -314,21 +315,32 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
     print(f"{len(folds)} folds, {len(reference['window_id'])} test windows each, "
           f"{len(np.unique(reference['patient']))} patients - window ids identical")
 
-    cfg = OmegaConf.merge(
-        OmegaConf.load("parameter/config.yaml"),
-        {"training": OmegaConf.load("parameter/training/default.yaml"),
-         "plot": OmegaConf.load("parameter/config.yaml").plot})
-    decoding = OmegaConf.to_container(cfg.training.decoding, resolve=True)
-    # The same table the run decoded with - scoring under a different one would measure a
-    # model nobody trained.
+    cfg = OmegaConf.load("parameter/config.yaml")
+    # The run's own settings, not `parameter/`: that tree is what the next run will use and it
+    # moves. Reading it here re-scores a finished run under a penalty, a table or a floor it
+    # never saw, and the report says nothing about the change having happened.
+    run_cfg = config_of(runs)
+    if run_cfg is not None and OmegaConf.select(run_cfg, "training.decoding") is not None:
+        decoding = OmegaConf.to_container(run_cfg.training.decoding, resolve=True)
+        event_iou = float(run_cfg.training.event_iou)
+    else:
+        print(f"no .hydra config under {runs} - falling back to parameter/, which may have moved "
+              f"since the run")
+        training = OmegaConf.load("parameter/training/default.yaml")
+        decoding = OmegaConf.to_container(training.decoding, resolve=True)
+        event_iou = float(training.event_iou)
+    if enforce_min is not None and bool(enforce_min) != bool(decoding["enforce_min"]):
+        print(f"OVERRIDE: enforce_min {decoding['enforce_min']} -> {bool(enforce_min)} "
+              f"- this is an ablation, not what the run decoded with")
+        decoding["enforce_min"] = bool(enforce_min)
     source = label_source or label_source_of(runs)
-    print(f"labels.source = {source}, "
+    print(f"labels.source = {source}, switch_penalty = {decoding['switch_penalty']}, "
+          f"enforce_min = {decoding['enforce_min']}, "
           f"transition table = {sorted(allowed_for(decoding, source))}")
     cost = (transition_matrix(allowed_for(decoding, source), decoding["switch_penalty"])
             if decoding["viterbi"] else None)
     min_duration = decoding["min_duration"] if decoding["enforce_min"] else None
     fps = float(np.median(reference["fps"]))
-    event_iou = float(cfg.training.event_iou)
     plot_cfg = OmegaConf.to_container(cfg.plot, resolve=True)
 
     both = {}
@@ -467,9 +479,13 @@ def main() -> int:
     parser.add_argument("--labels", default=None,
                         help="label source, for the transition table (default: read the run's "
                              "own .hydra config)")
+    parser.add_argument("--enforce-min", choices=("auto", "on", "off"), default="auto",
+                        help="minimum-duration pass. `auto` uses what the run decoded with; "
+                             "anything else is an ablation and is printed as one")
     args = parser.parse_args()
+    override = {"auto": None, "on": True, "off": False}[args.enforce_min]
     return 0 if aggregate(Path(args.runs), args.out and Path(args.out),
-                          args.bootstrap, args.per_page, args.labels) else 1
+                          args.bootstrap, args.per_page, args.labels, override) else 1
 
 
 if __name__ == "__main__":

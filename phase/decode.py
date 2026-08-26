@@ -7,7 +7,8 @@ passes fix it, both on the device's budget:
 1. **Viterbi** over the four classes with a transition matrix - impossible transitions cost
    infinity, staying costs nothing, an allowed change costs `switch_penalty`.
 2. **Minimum duration** - a surviving run shorter than its class's floor is absorbed into
-   whichever neighbour is longer.
+   whichever neighbour is longer. **Off by default**: measured after Viterbi it changes nothing,
+   and a floor deletes a real short phase rather than smoothing it. See `training.decoding`.
 
 The allowed transitions are configured, not written in here, because they are a claim about the
 label set rather than about physiology: production emits no phase for the turn from inhale to

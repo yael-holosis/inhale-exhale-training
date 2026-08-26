@@ -31,9 +31,15 @@ augmentation:
 
 decoding:
   viterbi: true
-  enforce_min: true
+  # Off. Measured on the 228 test windows of run 14-36-33: on top of Viterbi this pass moves
+  # macro F1 by -0.0001 and the span count by 0.1, and makes the stop duration error slightly
+  # worse. Viterbi's transition cost already suppresses the flicker it was there to catch, and
+  # a floor deletes real short phases rather than smoothing them - `stop: 2` forbids reporting
+  # any pause under 0.2 s against a labelled stop mean of 0.82 s. Kept, not deleted: it is the
+  # right tool if the transition table is ever turned off.
+  enforce_min: false
   switch_penalty: 2.0
-  # Samples at 10 fps. Anything shorter is a decoder artefact, not a breath.
+  # Samples at 10 fps. Only read when `enforce_min` is on.
   min_duration: {unknown: 1, inhale: 3, exhale: 3, stop: 2}
   # Which class may follow which. Describes the LABEL SET, not physiology, so there is one table
   # per source - a table from the wrong one forbids transitions the labels are full of, and
