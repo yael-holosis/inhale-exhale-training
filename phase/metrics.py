@@ -135,3 +135,45 @@ def phase_durations(labels: np.ndarray, fps: float) -> dict[str, float]:
     inhale, exhale = out.get("mean_inhale_sec"), out.get("mean_exhale_sec")
     out["ie_ratio"] = float(exhale / inhale) if inhale and inhale > 0 else float("nan")
     return out
+
+
+def duration_pairs(prediction: np.ndarray, truth: np.ndarray, fps: float) -> dict[str, tuple]:
+    """`{phase: (predicted_sec, labelled_sec)}` - the mean span length each side calls.
+
+    The quantity the device actually reports, so it is the one to measure agreement on. `nan`
+    where a side called no span of that phase at all: that is a coverage fact, not a zero, and
+    averaging a zero into it would invent agreement where there was no measurement.
+    """
+    said, meant = phase_durations(prediction, fps), phase_durations(truth, fps)
+    return {name: (said[f"mean_{name}_sec"], meant[f"mean_{name}_sec"])
+            for name in PHASES if name != PHASES[UNKNOWN]}
+
+
+def duration_agreement(pairs: list[dict[str, tuple]]) -> dict[str, dict[str, float]]:
+    """Bias, limits of agreement and MAE per phase, over the windows where both sides called it.
+
+    Bland-Altman: bias is the mean signed error and says whether the model systematically over-
+    or under-calls the phase; the limits are bias +- 1.96 SD and say how far a single window can
+    be. They answer different questions and a mean absolute error hides the first.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for name in (n for n in PHASES if n != PHASES[UNKNOWN]):
+        both = [(said, meant) for window in pairs
+                for said, meant in [window[name]]
+                if not (np.isnan(said) or np.isnan(meant))]
+        if not both:
+            out[name] = {"n": 0}
+            continue
+        said = np.array([a for a, _ in both])
+        meant = np.array([b for _, b in both])
+        error = said - meant
+        bias, spread = float(np.mean(error)), float(np.std(error, ddof=1)) if len(error) > 1 \
+            else 0.0
+        out[name] = {
+            "n": len(both), "coverage": len(both) / max(len(pairs), 1),
+            "bias_sec": bias, "mae_sec": float(np.mean(np.abs(error))),
+            "relative_mae": float(np.mean(np.abs(error) / np.maximum(meant, 1e-9))),
+            "loa_low": bias - 1.96 * spread, "loa_high": bias + 1.96 * spread,
+            "labelled_mean_sec": float(np.mean(meant)),
+        }
+    return out

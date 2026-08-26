@@ -25,6 +25,7 @@ import matplotlib
 matplotlib.use("Agg")                       # no display on a build host or in a training run
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
+from matplotlib.ticker import MaxNLocator
 
 import numpy as np
 
@@ -36,6 +37,7 @@ SURFACE = "#ffffff"
 INK = "#0b0b0b"
 INK_SOFT = "#52514e"
 GRID = "#eeeeee"
+ZERO_LINE = "#dddddd"     # the app's zeroline
 
 DEFAULT_COLORS = {"inhale": "#4C9BE8", "exhale": "#E8834C",
                   "stop": "#9AA0A6", "unknown": "#C2A878"}
@@ -87,29 +89,40 @@ def _ribbon(ax, target: np.ndarray, y: float, fps: float,
 def panel(ax, values: np.ndarray, reference: np.ndarray, prediction: np.ndarray, fps: float,
           title: str, colors: Mapping[str, str], span_alpha: float, trace_color: str,
           reference_label: str = "reference", prediction_label: str = "model") -> None:
-    t = np.arange(values.size) / fps
-    centred = values - values.mean()
-    scale = centred.std() or 1.0
+    # Drawn the way the labelling app draws it: **sample index on x, raw amplitude on y**.
+    # The app labels in sample index and shows seconds only in the hover, so plotting seconds
+    # against a z-scored y made the same window look like a different signal in the two places.
+    # The z-score belongs to the model input (`WindowDataset._normalise`), not to the picture.
+    index = np.arange(values.size)
 
-    _shade(ax, prediction, fps, colors, span_alpha)
-    ax.plot(t, centred / scale, color=trace_color, linewidth=1.5, zorder=2)
-    ax.set_xlim(0, max(t[-1], 1e-6))
-    ax.set_ylim(-3.2, 3.2)
-    ax.set_yticks([])
-    ax.grid(axis="x", color=GRID, linewidth=0.6, zorder=1)
+    _shade(ax, prediction, 1.0, colors, span_alpha)
+    ax.plot(index, values, color=trace_color, linewidth=1.6, zorder=2)
+    ax.set_xlim(0, max(values.size - 1, 1))
+    reach = float(np.max(np.abs(values))) or 1.0
+    ax.set_ylim(-reach * 1.15, reach * 1.15)
+    ax.axhline(0.0, color=ZERO_LINE, linewidth=1.0, zorder=1)
+    ax.set_ylabel("amplitude", fontsize=7.5, color=INK_SOFT)
+    # Three ticks: the traces run at 1e-3 and a default locator stacks five overlapping labels.
+    ax.yaxis.set_major_locator(MaxNLocator(3))
+    ax.ticklabel_format(axis="y", style="sci", scilimits=(-2, 2), useMathText=True)
+    ax.grid(color=GRID, linewidth=0.6, zorder=1)
     ax.set_axisbelow(False)
-    for side in ("top", "right", "left"):
+    for side in ("top", "right"):
         ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color(GRID)
-    ax.tick_params(axis="x", colors=INK_SOFT, labelsize=7.5, length=0, pad=TICK_PAD)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    ax.tick_params(colors=INK_SOFT, labelsize=7.5, length=0)
+    ax.tick_params(axis="x", pad=TICK_PAD)
     ax.set_title(title, fontsize=8.5, color=INK, loc="left", pad=8)
 
-    _ribbon(ax, reference, RIBBON_TOP, fps, colors)
+    _ribbon(ax, reference, RIBBON_TOP, 1.0, colors)
     # Axes fractions in **both** directions - `get_yaxis_transform` is data-in-y, so a y meant as
     # a fraction lands at that data value instead.
-    ax.text(-0.008, RIBBON_TOP + RIBBON_HEIGHT / 2, reference_label, transform=ax.transAxes,
-            ha="right", va="center", fontsize=7.5, color=INK_SOFT)
-    ax.text(-0.008, 0.5, prediction_label, transform=ax.transAxes, ha="right", va="center",
+    # On the right: the left side now carries a real amplitude axis, and the row labels
+    # collided with it.
+    ax.text(1.006, RIBBON_TOP + RIBBON_HEIGHT / 2, reference_label, transform=ax.transAxes,
+            ha="left", va="center", fontsize=7.5, color=INK_SOFT)
+    ax.text(1.006, 0.5, prediction_label, transform=ax.transAxes, ha="left", va="center",
             fontsize=7.5, color=INK_SOFT)
 
 
@@ -132,13 +145,14 @@ def plot_windows(items: Sequence[dict[str, Any]], out_path: str | Path, heading:
     span_alpha = float(cfg.get("span_alpha", DEFAULT_SPAN_ALPHA))
     trace_color = str(cfg.get("trace_color", DEFAULT_TRACE))
 
-    fig, axes = plt.subplots(len(items), 1, figsize=(11, 2.2 * len(items) + 1.3),
+    fig, axes = plt.subplots(len(items), 1, figsize=(11, 2.7 * len(items) + 1.3),
                              squeeze=False, facecolor=SURFACE)
     for ax, item in zip(axes.ravel(), items):
         ax.set_facecolor(SURFACE)
         panel(ax, item["values"], item["reference"], item["prediction"], item["fps"],
               item["title"], colors, span_alpha, trace_color, reference_name, prediction_name)
-    axes.ravel()[-1].set_xlabel("seconds", fontsize=8, color=INK_SOFT, labelpad=6)
+    axes.ravel()[-1].set_xlabel("sample index", fontsize=8, color=INK_SOFT,
+                                labelpad=6)
 
     if heading:
         fig.suptitle(heading, fontsize=10.5, color=INK, x=0.012, ha="left", y=0.997)
@@ -515,8 +529,11 @@ def decoding_report(table, out_path: str | Path,
     out_path.parent.mkdir(parents=True, exist_ok=True)
     splits = split_colors_of(dict(plot_cfg or {}))
 
-    keep = [m for m in ("macro_f1", "accuracy", *[f"f1_{n}" for n in PHASES],
-                        *[f"event_f1_{n}" for n in PHASES]) if m in set(table["metric"])]
+    # Per-sample and duration only. Event F1 scores whole spans by IoU, which is a proxy for
+    # fragmentation rather than for the durations the device reports - it moved the most and
+    # meant the least.
+    keep = [m for m in ("macro_f1", "accuracy", *[f"f1_{n}" for n in PHASES])
+            if m in set(table["metric"])]
     part = table[table.metric.isin(keep)].set_index("metric").loc[keep]
 
     y = np.arange(len(part))
@@ -558,6 +575,67 @@ def decoding_report(table, out_path: str | Path,
     fig.suptitle("post-processing: Viterbi over the network's own output", fontsize=10.5,
                  color=INK, x=0.008, ha="left", y=0.995)
     fig.subplots_adjust(left=0.16, right=0.985, top=1 - 0.5 / height, bottom=0.55 / height)
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+# ------------------------------------------------------------------------ phase durations
+
+def duration_report(pairs, agreement, out_path: str | Path,
+                    plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """Bland-Altman per phase: does the model call the same duration the labeller did?
+
+    One panel per phase, each window a point - x is the mean of the two readings, y their
+    difference. The solid line is the bias and the dashed pair the 95% limits of agreement.
+    Bias and limits answer different questions: a constant offset can be corrected, a wide
+    spread cannot, and a mean absolute error alone shows neither.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    colors = colors_of(dict(plot_cfg or {}))
+    named = [n for n in PHASES if n != PHASES[UNKNOWN]]
+
+    fig, axes = plt.subplots(1, len(named), figsize=(4.3 * len(named), 3.9), facecolor=SURFACE,
+                             squeeze=False)
+    for ax, name in zip(axes.ravel(), named):
+        ax.set_facecolor(SURFACE)
+        stats = agreement.get(name, {})
+        both = [(said, meant) for window in pairs
+                for said, meant in [window[name]]
+                if not (np.isnan(said) or np.isnan(meant))]
+        if both:
+            said = np.array([a for a, _ in both])
+            meant = np.array([b for _, b in both])
+            ax.scatter((said + meant) / 2, said - meant, s=22, alpha=0.65,
+                       color=colors[name], zorder=3)
+            for value, style, label in ((stats["bias_sec"], "-", "bias"),
+                                        (stats["loa_low"], "--", None),
+                                        (stats["loa_high"], "--", "95% limits")):
+                ax.axhline(value, color=INK_SOFT, linewidth=1.1, linestyle=style, zorder=2,
+                           label=label)
+            ax.axhline(0.0, color=GRID, linewidth=1.0, zorder=1)
+            ax.set_title(
+                f"{name}  ·  bias {stats['bias_sec']:+.2f}s  ·  MAE {stats['mae_sec']:.2f}s\n"
+                f"limits {stats['loa_low']:+.2f} to {stats['loa_high']:+.2f}s  ·  "
+                f"n={stats['n']} ({stats['coverage']:.0%} of windows)",
+                fontsize=8, color=INK, loc="left", pad=6)
+        else:
+            ax.set_title(f"{name} - never called by both", fontsize=8, color=INK_SOFT,
+                         loc="left", pad=6)
+        ax.set_xlabel("mean of the two, seconds", fontsize=8, color=INK_SOFT)
+        ax.grid(color=GRID, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+        for side in ("left", "bottom"):
+            ax.spines[side].set_color(GRID)
+    axes.ravel()[0].set_ylabel("model - labeller, seconds", fontsize=8, color=INK_SOFT)
+    axes.ravel()[0].legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="lower right")
+
+    fig.suptitle("phase duration agreement - the number the device reports", fontsize=10.5,
+                 color=INK, x=0.008, ha="left", y=0.99)
+    fig.tight_layout(rect=(0, 0, 1, 0.90))
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
