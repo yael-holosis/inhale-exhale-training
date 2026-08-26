@@ -15,6 +15,8 @@ import socket
 from typing import Any, Optional, Tuple
 from urllib.parse import urlparse
 
+from omegaconf import OmegaConf
+
 CONFIG_PATHS = ("~/clearml.conf", "./clearml.conf", "~/.clearml/clearml.conf")
 DEFAULT_API_PORT = 8008
 
@@ -102,7 +104,22 @@ def initialize_clearml_task(project_name: str, task_name: str, timeout: int = 10
 
 
 def run_title(cfg: Any) -> str:
-    """A name that says what the run was, so the ClearML list is readable without opening rows."""
+    """A name that says what the run was, so the ClearML list is readable without opening rows.
+
+    The label source and the corrections are in it because they decide what the model was
+    trained against: two runs differing only in a correction are not comparable, and a list of
+    identically-named rows hides exactly that.
+    """
     model = cfg.model
-    return (f"{cfg.data.name}_{model.name}_d{len(model.channels)}"
-            f"_k{model.kernel_size}")
+    labels = cfg.data.labels
+    parts = [cfg.data.name, str(labels.source), model.name,
+             f"d{len(model.channels)}", f"k{model.kernel_size}"]
+    corrections = OmegaConf.to_container(labels.corrections, resolve=True) \
+        if "corrections" in labels else {}
+    marks = []
+    if corrections.get("blank_edge_spans"):
+        marks.append("edgeblank")
+    above = corrections.get("all_unknown_above")
+    if above is not None:
+        marks.append(f"blank{round(float(above) * 100):g}")
+    return "_".join(parts + (marks or ["asdrawn"]))
