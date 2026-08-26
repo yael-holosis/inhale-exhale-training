@@ -1,4 +1,9 @@
 max_epochs: 60
+# Windows are bucketed by length before batching, so a batch is padded to its own longest member
+# rather than to the longest in the set - see `LengthBucketSampler`.
+batch_size: 64
+# A property of the machine, not of the run. 0 loads in the main process.
+num_workers: 4
 lr: 0.003
 weight_decay: 0.0001
 scheduler: cosine

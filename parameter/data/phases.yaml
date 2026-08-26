@@ -64,6 +64,3 @@ split:
 crop_samples: null
 # Per-window z-score: what the device can do at inference, having no corpus statistics.
 normalise: window
-
-batch_size: 64
-num_workers: 4

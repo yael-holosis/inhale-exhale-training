@@ -34,7 +34,8 @@ from phase.decode import decode
 from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
 from phase.labels import PHASES
 from phase.splits import SPLIT_COLUMN, describe, split_for
-from report_folds import aggregate
+from report_folds import (AGGREGATE_FIGURES, AGGREGATE_TABLES, PASSES, PAGES_DIR,
+                          aggregate)
 
 TEST_LOGITS_NAME = "test_logits.npz"
 FOLD_DIR = "fold_{fold}"
@@ -55,11 +56,11 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
         # `drop_last` stays off: bucketed by length, the short batch is the whole of a rare
         # length rather than a remainder - dropping it would discard every window of 300 samples
         # and longer, which is the part variable-length training exists to keep.
-        sampler = LengthBucketSampler(frame["samples"].to_numpy(), cfg.data.batch_size,
+        sampler = LengthBucketSampler(frame["samples"].to_numpy(), cfg.training.batch_size,
                                       shuffle=train, drop_last=False, seed=cfg.seed)
         out[name] = DataLoader(dataset, batch_sampler=sampler,
-                               num_workers=cfg.data.num_workers, collate_fn=collate,
-                               persistent_workers=cfg.data.num_workers > 0)
+                               num_workers=cfg.training.num_workers, collate_fn=collate,
+                               persistent_workers=cfg.training.num_workers > 0)
     return out
 
 
@@ -251,20 +252,18 @@ def main(cfg: DictConfig) -> None:
             # Both passes go up: `raw` is the network alone, `viterbi` is after post-processing,
             # and the comparison is what says whether the post-processing earned its place.
             logger = task.get_logger()
-            for pass_name in ("raw", "viterbi"):
-                for name in ("fold_report", "per_patient", "fold_scaling",
-                             "durations"):
+            for pass_name in PASSES:
+                for name in AGGREGATE_FIGURES:
                     figure = run_dir / pass_name / f"{name}.png"
                     if figure.exists():
                         logger.report_image(f"aggregate - {pass_name}", name, iteration=0,
                                             local_path=str(figure), max_image_history=1)
-                for name in ("per_fold", "ensemble_metrics", "per_patient",
-                             "fold_scaling", "duration_agreement"):
+                for name in AGGREGATE_TABLES:
                     table = run_dir / pass_name / f"{name}.csv"
                     if table.exists():
                         task.upload_artifact(f"{pass_name}_{name}", artifact_object=str(table))
-            for pass_name in ("raw", "viterbi"):
-                pages = sorted((run_dir / pass_name / "test_windows").glob("page_*.png"))
+            for pass_name in PASSES:
+                pages = sorted((run_dir / pass_name / PAGES_DIR).glob("page_*.png"))
                 for page in pages[:6]:
                     logger.report_image(f"test windows - {pass_name}", page.stem,
                                         iteration=0, local_path=str(page),
