@@ -103,17 +103,48 @@ def initialize_clearml_task(project_name: str, task_name: str, timeout: int = 10
         return None
 
 
+def _compact(value: float) -> str:
+    """`0.0001` -> `1e-4`, `0.001` -> `1e-3`, `0.1` -> `0.1`. Readable in a task list."""
+    if value == 0:
+        return "0"
+    text = f"{value:g}"
+    return text.replace("e-0", "e-").replace("e+0", "e")
+
+
+def parameter_count(model_cfg: Any) -> int | None:
+    """How many weights this model config makes. None if the net cannot be built here."""
+    try:
+        import torch  # noqa: F401
+
+        from models.unet1d import UNet1D
+
+        net = UNet1D(in_channels=int(model_cfg.in_channels),
+                     channels=[int(c) for c in model_cfg.channels],
+                     bottleneck=int(model_cfg.bottleneck),
+                     kernel_size=int(model_cfg.kernel_size),
+                     dropout=float(model_cfg.get("dropout", 0.0)))
+        return sum(p.numel() for p in net.parameters())
+    except Exception:                                                     # noqa: BLE001
+        return None
+
+
 def run_title(cfg: Any) -> str:
     """A name that says what the run was, so the ClearML list is readable without opening rows.
 
-    The label source and the corrections are in it because they decide what the model was
-    trained against: two runs differing only in a correction are not comparable, and a list of
-    identically-named rows hides exactly that.
+    Everything in here changes what the numbers mean, so two runs that differ in any of it must
+    not share a name: what it was trained against (label source, corrections), how much capacity
+    it had (shape and weight count), and how hard that capacity was held back (weight decay,
+    dropout). A list of identically-named rows hides exactly the comparison being run.
     """
     model = cfg.model
     labels = cfg.data.labels
-    parts = [cfg.data.name, str(labels.source), model.name,
-             f"d{len(model.channels)}", f"k{model.kernel_size}"]
+    shape = "-".join(str(int(c)) for c in model.channels) + f"x{int(model.bottleneck)}"
+    parts = [cfg.data.name, str(labels.source), model.name, shape, f"k{model.kernel_size}"]
+    weights = parameter_count(model)
+    if weights:
+        parts.append(f"{weights / 1000:.1f}kp")
+    parts.append(f"wd{_compact(float(cfg.training.weight_decay))}")
+    parts.append(f"do{_compact(float(model.get('dropout', 0.0)))}")
     corrections = OmegaConf.to_container(labels.corrections, resolve=True) \
         if "corrections" in labels else {}
     marks = []
