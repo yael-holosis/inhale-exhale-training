@@ -186,6 +186,10 @@ def on_fold(args, cfg) -> int:
 
 def on_human(args, cfg) -> int:
     """Every window in the dataset that also carries human spans, scored three ways."""
+    # Reads two accounts, like a build does - sign both in before the first query rather than
+    # discovering the second is dead halfway through.
+    if not sources.ensure_session():
+        return 1
     root = dataset_of(cfg, args.dataset)
     manifest = load_windows(root)
     corrections = Corrections.from_config(

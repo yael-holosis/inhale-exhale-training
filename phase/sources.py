@@ -61,8 +61,8 @@ def use_profile() -> str:
 
     Deliberately does **not** log in. `AwsProfileManager.select_aws_profile()` is an interactive
     picker that prompts on stdin, which hangs a build run to no purpose - the profile is named in
-    config precisely so nobody has to be asked. `sign_in` is the explicit, non-interactive
-    refresh, and `ensure_session` calls it when the credentials are actually unusable.
+    config precisely so nobody has to be asked. `ensure_session` is the sign-in, and an
+    entrypoint calls it once before any reading starts.
     """
     import boto3
 
@@ -89,27 +89,46 @@ def credentials_ok() -> bool:
 
 
 @lru_cache(maxsize=1)
-def ensure_session(timeout_s: int = 120) -> bool:
-    """Sign in if the process cannot reach AWS. Called once, at the top of a run.
+def required_profiles() -> list[str]:
+    """Every AWS profile a build needs, in the order it will need them.
 
-    Blocks until somebody approves the browser tab, so it belongs in a command-line entrypoint
-    and nowhere else.
+    More than one. `aws.profile` reaches the data-science account, but an environment whose
+    password lives in another account names its own `secret_profile` - and that one is not
+    touched until the build is already minutes in, reading the second instance's catalogue.
+    Signing into the first alone leaves a run that starts happily and dies later.
     """
-    import subprocess
+    names = [profile()]
+    for env in config()["environments"].values():
+        for role in env.values():
+            secret = role.get("secret_profile") if isinstance(role, dict) else None
+            if secret and secret not in names:
+                names.append(secret)
+    return names
 
-    use_profile()
+
+def ensure_session(timeout_s: int = 120) -> bool:
+    """Sign every profile in before the run starts. Called once, at a command-line entrypoint.
+
+    Blocks until somebody approves the browser tab, so it belongs in an entrypoint and nowhere
+    else. `AwsProfileManager.refresh_sso_token_if_needed` decides whether a refresh is due: it
+    reads `expiresAt` off the SSO cache rather than trusting `get-caller-identity`, which passes
+    against an access token whose refresh token is already dead - the exact failure that killed a
+    build twenty minutes in.
+    """
+    from holosis_aws_manager import AwsProfileManager
+
+    manager = AwsProfileManager(sso_login_timeout=timeout_s)
+    for name in required_profiles():
+        try:
+            manager.refresh_sso_token_if_needed(name)
+        except Exception as error:                                        # noqa: BLE001
+            print(f"could not refresh {name}: {type(error).__name__}: {error}")
+    use_profile()                    # a fresh token needs a fresh session
     if credentials_ok():
         return True
-    name = profile()
-    print(f"AWS session for {name} has expired - signing in")
-    try:
-        subprocess.run(["aws", "sso", "login", "--profile", name], timeout=timeout_s,
-                       check=False)
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as error:
-        print(f"sign in failed: {error}")
-        return False
-    use_profile()                    # a fresh token needs a fresh session
-    return credentials_ok()
+    print(f"still cannot reach AWS as {profile()} - run: "
+          + "; ".join(f"aws sso login --profile {n}" for n in required_profiles()))
+    return False
 
 
 # ------------------------------------------------------------------------------- credentials

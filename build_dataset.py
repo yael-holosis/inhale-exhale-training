@@ -199,9 +199,10 @@ def main() -> int:
         print(f"overrides: {' '.join(overrides)}")
     if args.recorrect:
         return run_recorrect(args, cfg)
+    # Signs in every account the build will need, not only the first one: `ds_prod` reads its
+    # password from Secrets Manager in the production account, and that is not touched until the
+    # run is already minutes deep.
     if not sources.ensure_session():
-        print(f"cannot reach AWS as {sources.profile()} - "
-              f"run: aws sso login --profile {sources.profile()}")
         return 1
     if args.catalogue:
         return max(show_catalogue(env_key) for env_key in args.env)

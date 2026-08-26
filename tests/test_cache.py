@@ -127,3 +127,22 @@ def test_an_unchanged_etag_still_serves_from_cache(cached):
     sources.window_samples(KEY)
     sources.window_samples(KEY)
     assert cached["n"] == 1, "an unchanged ETag must not trigger a download"
+
+
+def test_every_account_a_build_touches_is_signed_in(monkeypatch):
+    """`aws.profile` reaches the data-science account; an environment whose password sits in
+    another account names its own `secret_profile`, and that one is not needed until the build is
+    already minutes in. Signing into the first alone is what let a build start and then die."""
+    monkeypatch.setattr(sources, "config", lambda: {
+        "aws": {"profile": "main", "profile_env_var": "NOT_SET"},
+        "environments": {
+            "ds_algo": {"labels": {"secret_name": "a"}},
+            "ds_prod": {"labels": {"secret_name": "b", "secret_profile": "other-account"},
+                        "windows": {"secret_name": "c", "secret_profile": "other-account"}},
+        }})
+    # Every account, each once, the main profile first.
+    assert sources.required_profiles() == ["main", "other-account"]
+
+
+def test_the_real_config_needs_two_accounts():
+    assert len(sources.required_profiles()) >= 2
