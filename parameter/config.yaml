@@ -11,6 +11,12 @@ clearml:
   project_name: inhale-exhale-phase
   enabled: true
   timeout_s: 10
+  # Which decoding passes get their figures and tables uploaded. Both are always written to disk;
+  # this is only what the task carries. `viterbi` alone by default: `raw` is the same model scored
+  # without post-processing, so uploading it doubles every figure and page to answer one question
+  # - whether the decoder earned its place - which `raw_vs_viterbi` already answers with every
+  # metric for both. Add `raw` back for an ablation, where the network's own output is the subject.
+  passes: [viterbi]
 
 plot:
   # 0 turns figures off.

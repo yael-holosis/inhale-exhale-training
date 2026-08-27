@@ -252,7 +252,15 @@ def main(cfg: DictConfig) -> None:
             # Both passes go up: `raw` is the network alone, `viterbi` is after post-processing,
             # and the comparison is what says whether the post-processing earned its place.
             logger = task.get_logger()
-            for pass_name in PASSES:
+            uploaded = [name for name in cfg.clearml.passes if name in PASSES]
+            missing = [name for name in cfg.clearml.passes if name not in PASSES]
+            if missing:
+                raise ValueError(f"clearml.passes has {missing}, which no pass produces; "
+                                 f"the passes are {list(PASSES)}")
+            print(f"uploading the {', '.join(uploaded)} pass to ClearML; "
+                  f"{', '.join(n for n in PASSES if n not in uploaded) or 'nothing'} stays on "
+                  f"disk only")
+            for pass_name in uploaded:
                 for name in AGGREGATE_FIGURES:
                     figure = run_dir / pass_name / f"{name}.png"
                     if figure.exists():
@@ -262,7 +270,7 @@ def main(cfg: DictConfig) -> None:
                     table = run_dir / pass_name / f"{name}.csv"
                     if table.exists():
                         task.upload_artifact(f"{pass_name}_{name}", artifact_object=str(table))
-            for pass_name in PASSES:
+            for pass_name in uploaded:
                 pages = sorted((run_dir / pass_name / PAGES_DIR).glob("page_*.png"))
                 for page in pages[:6]:
                     logger.report_image(f"test windows - {pass_name}", page.stem,

@@ -441,6 +441,86 @@ Using the algorithm table on human labels forbids the commonest transition there
 bridges it with a one-sample `unknown` on **every breath** - an artefact of the table, not of the
 model. That is what a wrong table looks like, and it is why the source picks the table.
 
+## Time spent in each phase
+
+This is what the network is *for*, and per-sample F1 is a poor proxy for it: a boundary two
+samples late costs almost nothing in F1 and costs 0.2 s of inhale time, while a phase broken into
+three scores badly with its total time intact. Every run writes two reports per decoding pass,
+under `raw/` and `viterbi/`:
+
+Both figures carry the same two rows, so a reader learns one layout: row 1 is a **Bland-Altman**
+plot - x the mean of the two readings, y their difference, the solid line the bias and the dashed
+pair the 95% limits of agreement (bias ± 1.96 SD) - and row 2 is **model against labeller** with
+the line of equality. Neither replaces the other: Bland-Altman says whether the error depends on
+the reading itself, and the scatter shows the range each side actually calls, which a difference
+plot throws away. The median error and the 5-95% band are in row 2's title, because asymmetry is
+the one thing a bias and a pair of limits assume away.
+
+- `span_durations.png` / `span_duration_errors.csv` / `span_duration_agreement.csv` - **per
+  breath.** Each labelled span is matched to the prediction of the same phase, IoU-matched with
+  the same rule the event metrics use, and the signed difference of their lengths is one point.
+  Unmatched spans carry no duration error at all - a miss and a wrong length are different
+  failures - so they appear only as the coverage figure beside the error.
+- `signal_durations.png` / `signal_duration_medians.csv` / `signal_duration_agreement.csv` -
+  **per recording.** The median span length each side calls over all the windows of one signal,
+  compared side by side, with no matching. This is the number a session report would carry, and
+  it is not the average of the first: a per-breath error that cancels disappears here and a
+  systematic one does not.
+
+**The fourth column is the I:E ratio**, because it is what a clinician reads and because it is
+the one quantity a pair of compensating duration errors cannot hide in. Per breath it is one
+breath's exhale over that breath's own inhale, and only where **both** of its spans matched a
+prediction - a ratio built from one matched span and one guess is not a reading of the same
+breath. Per signal it is the ratio of that signal's two medians, not the median of the per-breath
+ratios, and it is usable only where both phases were. An `unknown` gap between the inhale and the
+exhale does not break the breath: on algorithm labels that gap is production's turn and is there
+on every breath.
+
+**A span the window boundary cut is excluded from both, on both sides.** Its stored length is the
+length of the fragment left inside the window, not of the phase, so comparing it against a whole
+span measures the cut and nothing else. Dropping it on one side only would be the same mistake
+with a sign. `unknown` is not measured at all - production emits no phase for the turn from
+inhale to exhale, so a duration for that class describes the label set rather than time anybody
+spends.
+
+Signals are keyed on `(env, RadarSignalID)`. The two instances have separate id spaces, so the
+signal id alone pools two different recordings, exactly as the window id does. A signal needs at
+least three spans of the phase on **both** sides to carry a median; thinner ones are marked
+`usable = False` in the csv and counted on the figure rather than dropped quietly.
+
+The older `durations.png` in the same directory is a different quantity - the mean span length of
+a whole window, taken over the boundary-cut spans too. It is still written but **no longer
+uploaded to ClearML**: the two above measure the same thing without the fragments, and split it
+into the per-breath and per-recording questions.
+
+Measured on the 228 test windows of `outputs/2026-08-26/14-36-33` (5 folds, ensemble, viterbi,
+`labels.source=human`):
+
+| quantity | per-span bias | per-span MAE | matched | per-signal bias | per-signal MAE |
+| --- | --- | --- | --- | --- | --- |
+| inhale | -0.03 s (-1%) | 0.09 s (7%) | 888 / 945 spans (94%) | -0.02 s (-1%) | 0.07 s (5%) |
+| exhale | -0.12 s (-5%) | 0.22 s (14%) | 838 / 924 spans (91%) | -0.15 s (-7%) | 0.21 s (12%) |
+| stop | +0.10 s (+18%) | 0.19 s (28%) | 610 / 818 spans (75%) | +0.13 s (+28%) | 0.23 s (41%) |
+| exhale/inhale | -0.08 (-2%) | 0.21 (16%) | 768 / 840 breaths (91%) | -0.09 (-6%) | 0.16 (12%) |
+
+Read the `stop` row with the coverage column: a quarter of the labelled stops were never matched
+at all, so its 0.19 s is the error over the three quarters that were.
+
+**Both percentages are taken per reading, against that reading's own labelled duration** -
+`relative_bias` is `mean(e/d)` and keeps the direction, `relative_mae` is `mean(|e|/d)` and drops
+it. Neither is the seconds figure divided by the phase's mean duration; on `stop` that would read
+21% and 31% instead of 28% and 41%, because averaging a ratio weights a 0.15 s error on a 0.3 s
+stop like the same error on a 2 s one. They answer "how wrong is a typical span, in proportion to
+itself" and not "how far off is total time in the phase". `relative_median`, the median of the same
+ratio, is in the csv beside them for the runs where that tail matters.
+
+To re-report a finished run after the metric changes, without paying for the bootstrap, the fold
+subsets and the window panels again:
+
+```bash
+poetry run python report_folds.py --runs outputs/<date>/<time> --durations-only
+```
+
 ## Looking at the test set
 
 ```bash
@@ -451,6 +531,12 @@ poetry run python evaluate.py --checkpoint <ckpt> --plot 4 --plot-pick worst
 `train.py` draws one automatically at the end of every run and uploads it to ClearML as a debug
 sample, because a macro F1 does not say whether the breaths came out as breaths and nobody goes
 back to draw a page for a run that looked fine at the time.
+
+**Only the `viterbi` pass is uploaded** - `clearml.passes` in `parameter/config.yaml`. Both passes
+are always written to disk; uploading both doubled every figure, page and table to answer one
+question, whether the decoder earned its place, and `raw_vs_viterbi.csv` already answers that with
+every metric for both. Set `clearml.passes=[raw,viterbi]` for an ablation where the network's own
+output is the subject.
 
 **The model's answer is the shading behind the trace; the reference is the ribbon underneath.**
 That is the labelling app's own layout, and reading it the same way in both places is worth more
@@ -495,7 +581,8 @@ The repo root holds only things you can run.
 - `parameter/` - the Hydra config tree, plus `sources/default.yaml` (databases, bucket, tables).
 - `phase/` - `sources` (the two databases and S3), `production` (production's phase call and the
   pairing of its boundary arrays), `labelsources` (algorithm or human), `labels` (the vocabulary),
-  `building` (the dataset directory), `dataset`, `splits`, `decode`, `metrics`.
+  `building` (the dataset directory), `dataset`, `splits`, `decode`, `metrics`,
+  `durations` (time spent in each phase).
 
 `phase/production.py` is the file to watch. It is a faithful port of the phase call and span
 pairing that `inhale-exhale-detection` validated, running against `holosissystem` directly - and

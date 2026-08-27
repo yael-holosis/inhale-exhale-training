@@ -22,7 +22,7 @@ from typing import Any
 
 import numpy as np
 
-from phase.labels import UNKNOWN, targets_to_spans
+from phase.labels import UNKNOWN, targets_to_spans, touches_edge
 
 BLANK_EDGE_SPANS = "blank_edge_spans"
 ALL_UNKNOWN_ABOVE = "all_unknown_above"
@@ -80,6 +80,6 @@ def blank_edges(target: np.ndarray) -> np.ndarray:
     if not spans:
         return out
     for span in (spans[0], spans[-1]):
-        if span["start"] == 0 or span["end"] == out.size:
+        if touches_edge(span, out.size):
             out[span["start"]:span["end"]] = UNKNOWN
     return out

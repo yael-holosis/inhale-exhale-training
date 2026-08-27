@@ -21,6 +21,12 @@ import numpy as np
 
 from phase.labels import PHASES, UNKNOWN, targets_to_spans
 
+LOA_Z = 1.96
+"""Bland-Altman: the limits of agreement are the bias plus and minus this many SD."""
+
+EPS_SEC = 1e-9
+"""Floor under a labelled duration before dividing by it, for a relative error."""
+
 
 def per_sample(pred: np.ndarray, truth: np.ndarray,
                mask: np.ndarray | None = None) -> dict[str, float]:
@@ -100,8 +106,14 @@ def event_level(pred: np.ndarray, truth: np.ndarray,
     return out
 
 
-def _match(reference: list[dict], proposed: list[dict], threshold: float):
-    taken, matched, start_errors, end_errors = set(), 0, [], []
+def match_spans(reference: list[dict], proposed: list[dict],
+                threshold: float) -> list[tuple[dict, dict, float]]:
+    """Greedy best-IoU pairing inside one class: `(labelled, called, iou)` per match.
+
+    One proposal answers at most one reference span, so a prediction covering two labelled
+    breaths is one match and one miss rather than two matches.
+    """
+    taken, pairs = set(), []
     for target in reference:
         best, best_iou = None, 0.0
         for position, candidate in enumerate(proposed):
@@ -118,10 +130,15 @@ def _match(reference: list[dict], proposed: list[dict], threshold: float):
                 best, best_iou = position, iou
         if best is not None and best_iou >= threshold:
             taken.add(best)
-            matched += 1
-            start_errors.append(proposed[best]["start"] - target["start"])
-            end_errors.append(proposed[best]["end"] - target["end"])
-    return matched, start_errors, end_errors
+            pairs.append((target, proposed[best], best_iou))
+    return pairs
+
+
+def _match(reference: list[dict], proposed: list[dict], threshold: float):
+    pairs = match_spans(reference, proposed, threshold)
+    return (len(pairs),
+            [called["start"] - labelled["start"] for labelled, called, _ in pairs],
+            [called["end"] - labelled["end"] for labelled, called, _ in pairs])
 
 
 def phase_durations(labels: np.ndarray, fps: float) -> dict[str, float]:
@@ -172,8 +189,8 @@ def duration_agreement(pairs: list[dict[str, tuple]]) -> dict[str, dict[str, flo
         out[name] = {
             "n": len(both), "coverage": len(both) / max(len(pairs), 1),
             "bias_sec": bias, "mae_sec": float(np.mean(np.abs(error))),
-            "relative_mae": float(np.mean(np.abs(error) / np.maximum(meant, 1e-9))),
-            "loa_low": bias - 1.96 * spread, "loa_high": bias + 1.96 * spread,
+            "relative_mae": float(np.mean(np.abs(error) / np.maximum(meant, EPS_SEC))),
+            "loa_low": bias - LOA_Z * spread, "loa_high": bias + LOA_Z * spread,
             "labelled_mean_sec": float(np.mean(meant)),
         }
     return out

@@ -29,6 +29,7 @@ from matplotlib.ticker import MaxNLocator
 
 import numpy as np
 
+from phase.durations import COLUMNS, LABEL, MEDIAN, MODEL, RATIO, USABLE
 from phase.labels import PHASES, UNKNOWN, targets_to_spans
 from phase.metrics import per_sample
 from phase.splits import FOLD_COLUMN, SPLIT_COLUMN, TEST, TRAIN, VAL
@@ -42,6 +43,10 @@ ZERO_LINE = "#dddddd"     # the app's zeroline
 DEFAULT_COLORS = {"inhale": "#4C9BE8", "exhale": "#E8834C",
                   "stop": "#9AA0A6", "unknown": "#C2A878"}
 """The labelling app's `plot.phase_colors`. Overridden by `plot.phase_colors` in the config."""
+
+DERIVED_COLOR = "#6B6094"
+"""For a quantity derived from the phases rather than one of them - the I:E ratio. Deliberately
+outside the phase palette: a reader must never wonder whether a colour means `inhale`."""
 
 DEFAULT_SPAN_ALPHA = 0.30
 DEFAULT_TRACE = "#222222"
@@ -639,3 +644,166 @@ def duration_report(pairs, agreement, out_path: str | Path,
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def _tidy(ax, xlabel: str = "", ylabel: str = "") -> None:
+    ax.set_facecolor(SURFACE)
+    ax.grid(color=GRID, linewidth=0.6)
+    ax.set_axisbelow(True)
+    ax.tick_params(labelsize=7.5, colors=INK_SOFT, length=0)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(GRID)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontsize=8, color=INK_SOFT)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=8, color=INK_SOFT)
+
+
+def _bland_altman(ax, labelled: np.ndarray, called: np.ndarray, row, color: str) -> None:
+    """A Bland-Altman plot: x the mean of the two readings, y their difference.
+
+    The standard way two measurements of the same thing are compared, and the reason the bias and
+    the limits are drawn rather than a correlation: a regression of one on the other can be near
+    perfect while every reading is half a second out.
+    """
+    ax.scatter((labelled + called) / 2, called - labelled, s=20, alpha=0.6, color=color,
+               zorder=3, edgecolors="none")
+    for value, style, label in ((row["bias_sec"], "-", "bias"),
+                                (row["loa_low"], "--", None),
+                                (row["loa_high"], "--", "95% limits")):
+        ax.axhline(value, color=INK_SOFT, linewidth=1.1, linestyle=style, zorder=2, label=label)
+    ax.axhline(0.0, color=ZERO_LINE, linewidth=1.0, zorder=1)
+
+
+def _identity_line(ax, labelled: np.ndarray, called: np.ndarray) -> None:
+    both = np.concatenate([labelled, called])
+    low, high = float(np.min(both)), float(np.max(both))
+    pad = 0.05 * max(high - low, 0.1)
+    ax.plot([low - pad, high + pad], [low - pad, high + pad], color=INK_SOFT, linewidth=1.0,
+            linestyle="--", zorder=2, label="equal")
+
+
+def _coverage(row, unit: str) -> tuple[str, str]:
+    """`(what was counted, what was not)`. A small duration error over half the spans is not
+    agreement, so what fell out belongs on the figure and not only in the csv."""
+    if f"{LABEL}_spans" in row and not np.isnan(row.get(f"{LABEL}_spans", np.nan)):
+        return (f"n={int(row['n'])} of {int(row[f'{LABEL}_spans'])} labelled {unit} matched "
+                f"({row['matched_fraction']:.0%})",
+                f"\n{int(row[f'unmatched_{MODEL}'])} predicted spans matched nothing")
+    if "signals_seen" in row and not np.isnan(row.get("signals_seen", np.nan)):
+        return (f"n={int(row['n'])} of {int(row['signals_seen'])} {unit}",
+                f"\n{int(row['signals_thin'])} signals too thin for a median")
+    return f"n={int(row['n'])} {unit}", ""
+
+
+def _duration_grid(frame, stats, out_path: str | Path, heading: str, subtitle: str,
+                   labelled_col: str, model_col: str, unit: str,
+                   plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """Two rows per quantity, because they are read differently and neither replaces the other.
+
+    **Bland-Altman** says whether the error depends on the reading itself - a model right on a 1 s
+    inhale and short on a 2 s one is a different problem from one uniformly short - and puts the
+    bias and the limits of agreement on the same picture.
+
+    **Model against labeller**, with the line of equality, is the one a reader checks a single
+    recording against: it shows the range each side actually calls, which a difference plot throws
+    away, and a systematic slope shows as a fan away from the line.
+    """
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    colors = colors_of(dict(plot_cfg or {}))
+
+    fig, axes = plt.subplots(2, len(COLUMNS), figsize=(4.15 * len(COLUMNS), 7.0),
+                             facecolor=SURFACE, squeeze=False)
+    for column, name in enumerate(COLUMNS):
+        # The ratio is dimensionless and is not a phase, so it takes neither the phase palette
+        # nor the seconds axis.
+        is_ratio = name == RATIO
+        tint = DERIVED_COLOR if is_ratio else colors[name]
+        axis = "ratio" if is_ratio else "seconds"
+        suffix = "" if is_ratio else "s"
+        altman, against = axes[0][column], axes[1][column]
+        row = stats.loc[name] if name in stats.index else {"n": 0}
+        picked = (frame[(frame["phase"] == name)].dropna(subset=[labelled_col, model_col])
+                  if len(frame) else frame)
+        if not row.get("n") or not len(picked):
+            for ax in (altman, against):
+                _tidy(ax)
+                ax.set_title(f"{name} - never called by both", fontsize=8, color=INK_SOFT,
+                             loc="left", pad=6)
+            continue
+        labelled = picked[labelled_col].to_numpy(float)
+        called = picked[model_col].to_numpy(float)
+
+        counted, dropped = _coverage(row, "breaths" if is_ratio and unit == "spans" else unit)
+        _bland_altman(altman, labelled, called, row, tint)
+        _tidy(altman, f"mean of the two, {axis}")
+        altman.set_title(
+            f"{name}  ·  bias {row['bias_sec']:+.2f}{suffix} "
+            f"({row['relative_bias']:+.0%})  ·  "
+            f"MAE {row['mae_sec']:.2f}{suffix} ({row['relative_mae']:.0%})"
+            f"\nlimits {row['loa_low']:+.2f} to "
+            f"{row['loa_high']:+.2f}{suffix}  ·  {counted}",
+            fontsize=8, color=INK, loc="left", pad=6)
+
+        against.scatter(labelled, called, s=20, alpha=0.6, color=tint, zorder=3,
+                        edgecolors="none")
+        _identity_line(against, labelled, called)
+        _tidy(against, f"labeller, {axis}")
+        # The distribution used to be a third row. What it carried that the two rows above do
+        # not is the median error and the 5-95% band, which are asymmetry - so those stay, as
+        # text, rather than the panel.
+        against.set_title(f"labelled mean {row[f'{LABEL}_mean_sec']:.2f}{suffix}  ·  "
+                          f"median error {row['median_error_sec']:+.2f}{suffix}  ·  "
+                          f"5-95% {row['p5_sec']:+.2f} to {row['p95_sec']:+.2f}{suffix}"
+                          f"{dropped}",
+                          fontsize=8, color=INK_SOFT, loc="left", pad=6)
+
+    axes[0][0].set_ylabel("Bland-Altman: model - labeller", fontsize=8, color=INK_SOFT)
+    axes[1][0].set_ylabel("model", fontsize=8, color=INK_SOFT)
+    for ax in (axes[0][0], axes[1][0]):
+        handles, _ = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="best")
+
+    fig.suptitle(heading, fontsize=10.5, color=INK, x=0.008, ha="left", y=1.0)
+    fig.text(0.008, 0.968, subtitle, fontsize=8, color=INK_SOFT, ha="left", va="top",
+             linespacing=1.5)
+    fig.tight_layout(rect=(0, 0, 1, 0.905))
+    fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def span_duration_report(pairs, stats, out_path: str | Path,
+                         plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """The duration error on a single breath - one point per matched span."""
+    return _duration_grid(
+        pairs, stats, out_path,
+        "phase duration, breath by breath - the time the network says was spent in the phase",
+        "ROW 1: Bland-Altman - x is the mean of the two readings, y their difference; the solid "
+        "line is the bias and the dashed pair the 95% limits of agreement, bias \u00b1 1.96 SD.  "
+        "ROW 2: model against labeller, with the line of equality.\nOne point per labelled span, matched to the prediction of the same phase by "
+        "IoU; spans the window boundary cut are excluded from both sides. The fourth column is one "
+        "breath's exhale over its own inhale, where both spans of that breath matched. Percentages "
+        "are per reading against the labelled value itself - signed beside the bias, absolute "
+        "beside the MAE.",
+        f"{LABEL}_sec", f"{MODEL}_sec", "spans", plot_cfg)
+
+
+def signal_duration_report(medians, stats, out_path: str | Path,
+                           plot_cfg: Mapping[str, Any] | None = None) -> Path:
+    """The number a session report would carry - one point per recording."""
+    return _duration_grid(
+        medians[medians[USABLE]] if len(medians) else medians, stats, out_path,
+        "phase duration per recording - the median breath, model against labeller",
+        "ROW 1: Bland-Altman - x is the mean of the two readings, y their difference; the solid "
+        "line is the bias and the dashed pair the 95% limits of agreement, bias \u00b1 1.96 SD.  "
+        "ROW 2: model against labeller, with the line of equality.\nOne point per radar signal: the median span length each side called over "
+        "that signal's windows, unmatched. Boundary-cut spans excluded; a signal needs enough spans "
+        "on both sides to carry a median. The fourth column is the ratio of that signal's two "
+        "medians, usable only where both phases were. Percentages are per signal against the "
+        "labelled median - signed beside the bias, absolute beside the MAE.",
+        f"{MEDIAN}_{LABEL}", f"{MEDIAN}_{MODEL}", "signals", plot_cfg)

@@ -63,6 +63,11 @@ def targets_to_spans(target: np.ndarray) -> list[dict]:
             for start, end in zip(starts, ends)]
 
 
+def touches_edge(span: dict, n_samples: int) -> bool:
+    """Whether the window boundary cut this span, so its length is a fragment's, not a phase's."""
+    return int(span["start"]) == 0 or int(span["end"]) == int(n_samples)
+
+
 def class_counts(target: np.ndarray) -> dict[str, int]:
     counts = np.bincount(np.asarray(target).ravel(), minlength=N_CLASSES)
     return {name: int(counts[index]) for index, name in enumerate(PHASES)}

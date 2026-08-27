@@ -34,7 +34,7 @@ import pandas as pd
 from omegaconf import OmegaConf
 
 from models.lightning_module import allowed_for
-from phase import figures
+from phase import durations, figures
 from phase.building import load_windows, shard_path
 from phase.decode import decode, transition_matrix
 from phase.labels import N_CLASSES, PHASES, UNKNOWN
@@ -137,45 +137,63 @@ DATASET_NAME = "dataset.txt"
 PAGES_DIR = "test_windows"
 
 
-def traces_for(runs: Path, window_ids: np.ndarray,
-               envs: np.ndarray) -> dict[tuple[str, int], dict]:
-    """The stored waveform and provenance for each test window, keyed by `(env, window id)`.
+WINDOW_KEYS = ["env", "RespirationWindowID"]
 
-    The signal and the index within it come along because they are what identifies a window in
-    the labelling app - the window id alone does not, it collides across the two instances.
 
-    Keyed by the pair because the id alone is not unique - the two instances have separate id
-    spaces and 13 of 360 windows collide on the current set. The traces come from the dataset the
-    run names in `dataset.txt`, which is why that file is written beside every run.
-    """
+def dataset_of(runs: Path) -> Path | None:
+    """The dataset a run was trained on, off the `dataset.txt` written beside every fold."""
     named = next((d / DATASET_NAME for d in sorted(runs.iterdir())
                   if (d / DATASET_NAME).exists()), None)
     if named is None:
-        return {}
+        return None
     dataset = Path(named.read_text().strip())
     if not dataset.is_absolute() and not dataset.exists():
         # `dataset.txt` records the path as the run saw it, which is relative to the repo root.
         # A caller running from anywhere else - a notebook, say - resolves it against its own
         # directory and finds nothing, which reads as a deleted dataset rather than a bad path.
         dataset = Path(__file__).resolve().parent / dataset
-    if not dataset.exists():
-        print(f"{dataset} is gone - cannot draw the windows")
-        return {}
+    return dataset if dataset.exists() else None
 
-    manifest = load_windows(dataset).set_index(["env", "RespirationWindowID"])
+
+def provenance_for(runs: Path, window_ids: np.ndarray,
+                   envs: np.ndarray) -> dict[tuple[str, int], dict]:
+    """Where each test window came from, keyed by `(env, window id)`.
+
+    Keyed by the pair because the id alone is not unique - the two instances have separate id
+    spaces and 13 of 360 windows collide on the current set. The same holds for the signal id,
+    which is why anything grouped by signal has to carry `env` with it.
+    """
+    dataset = dataset_of(runs)
+    if dataset is None:
+        print(f"no reachable dataset named under {runs} - no provenance for the test windows")
+        return {}
+    manifest = load_windows(dataset).set_index(WINDOW_KEYS)
     out = {}
     for env, window_id in zip(envs.tolist(), window_ids.tolist()):
         key = (str(env), int(window_id))
         if key not in manifest.index:
             continue
         row = manifest.loc[key]
-        with np.load(shard_path(dataset, str(row["shard"])), allow_pickle=False) as stored:
-            position = int(row["position"])
-            start, end = stored["offsets"][position], stored["offsets"][position + 1]
-            out[key] = {"values": stored["values"][start:end].astype(np.float32),
-                        "signal": int(row["RadarSignalID"]),
-                        "session": int(row["SessionID"]),
-                        "window_index": int(row["WindowIndex"])}
+        out[key] = {"shard": str(row["shard"]), "position": int(row["position"]),
+                    "signal": int(row["RadarSignalID"]),
+                    "session": int(row["SessionID"]),
+                    "window_index": int(row["WindowIndex"])}
+    return out
+
+
+def traces_for(runs: Path, window_ids: np.ndarray,
+               envs: np.ndarray) -> dict[tuple[str, int], dict]:
+    """`provenance_for` with the stored waveform attached, for the panels."""
+    dataset = dataset_of(runs)
+    found = provenance_for(runs, window_ids, envs)
+    if dataset is None or not found:
+        return {}
+    out = {}
+    for key, row in found.items():
+        with np.load(shard_path(dataset, row["shard"]), allow_pickle=False) as stored:
+            start, end = (stored["offsets"][row["position"]],
+                          stored["offsets"][row["position"] + 1])
+            out[key] = {**row, "values": stored["values"][start:end].astype(np.float32)}
     return out
 
 
@@ -289,23 +307,13 @@ def label_source_of(runs: Path) -> str:
     return ALGORITHM
 
 
-def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
-              per_page: int = 8, label_source: str | None = None,
-              enforce_min: bool | None = None) -> dict | None:
-    """Pool every fold under `runs`, scored **twice** - once on the network's own argmax and once
-    through the decoder - so what the post-processing is worth is visible rather than assumed.
-
-    The decoder is post-processing, nothing more: the same saved logits are scored both ways, and
-    the network is identical in each. Returns the decoded metrics, which are the ones to quote.
-    """
-    runs = Path(runs)
-    out_dir = Path(out_dir) if out_dir else runs
+def load_run(runs: Path) -> list[dict] | None:
+    """Every fold under `runs`, checked for the shared test set that makes them comparable."""
     folds = [load_fold(d) for d in sorted(runs.iterdir())
              if d.is_dir() and (d / LOGITS_NAME).exists()]
     if not folds:
         print(f"no fold under {runs} carries {LOGITS_NAME}")
         return None
-
     reference = folds[0]
     for fold in folds[1:]:
         if not np.array_equal(fold["window_id"], reference["window_id"]):
@@ -314,11 +322,18 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
                 f"these folds are not comparable and must not be pooled")
     print(f"{len(folds)} folds, {len(reference['window_id'])} test windows each, "
           f"{len(np.unique(reference['patient']))} patients - window ids identical")
+    return folds
 
+
+def settings_of(runs: Path, folds: list[dict], label_source: str | None,
+                enforce_min: bool | None) -> dict:
+    """How to decode and score this run - **its own** settings, not `parameter/`.
+
+    That tree is what the next run will use and it moves. Reading it here re-scores a finished
+    run under a penalty, a transition table or a duration floor it never saw, and nothing in the
+    report says the change happened.
+    """
     cfg = OmegaConf.load("parameter/config.yaml")
-    # The run's own settings, not `parameter/`: that tree is what the next run will use and it
-    # moves. Reading it here re-scores a finished run under a penalty, a table or a floor it
-    # never saw, and the report says nothing about the change having happened.
     run_cfg = config_of(runs)
     if run_cfg is not None and OmegaConf.select(run_cfg, "training.decoding") is not None:
         decoding = OmegaConf.to_container(run_cfg.training.decoding, resolve=True)
@@ -339,19 +354,156 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
           f"transition table = {sorted(allowed_for(decoding, source))}")
     cost = (transition_matrix(allowed_for(decoding, source), decoding["switch_penalty"])
             if decoding["viterbi"] else None)
-    min_duration = decoding["min_duration"] if decoding["enforce_min"] else None
-    fps = float(np.median(reference["fps"]))
-    plot_cfg = OmegaConf.to_container(cfg.plot, resolve=True)
+    return {"cost": cost,
+            "min_duration": decoding["min_duration"] if decoding["enforce_min"] else None,
+            "event_iou": event_iou, "fps": float(np.median(folds[0]["fps"])),
+            "plot_cfg": OmegaConf.to_container(cfg.plot, resolve=True), "seed": int(cfg.seed)}
+
+
+def ensemble_of(folds: list[dict]) -> tuple[dict, list]:
+    """The folds' **logits** averaged per sample, and the per-window view of them.
+
+    Logits, not decoded labels: a majority vote over labels throws away the transition matrix
+    and the duration floors that the decoder exists to enforce.
+    """
+    stacked = np.stack([fold["logits"] for fold in folds])
+    ensemble = {**folds[0], "logits": stacked.mean(axis=0), "fold": "ensemble"}
+    return ensemble, windows_of(ensemble)
+
+
+def passes_of(settings: dict) -> tuple[tuple[str, tuple], ...]:
+    """The two scorings every report runs: the network alone, and the network plus the decoder."""
+    return ((RAW, (None, None)),
+            (DECODED, (settings["cost"], settings["min_duration"])))
+
+
+def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
+              per_page: int = 8, label_source: str | None = None,
+              enforce_min: bool | None = None) -> dict | None:
+    """Pool every fold under `runs`, scored **twice** - once on the network's own argmax and once
+    through the decoder - so what the post-processing is worth is visible rather than assumed.
+
+    The decoder is post-processing, nothing more: the same saved logits are scored both ways, and
+    the network is identical in each. Returns the decoded metrics, which are the ones to quote.
+    """
+    runs = Path(runs)
+    out_dir = Path(out_dir) if out_dir else runs
+    folds = load_run(runs)
+    if not folds:
+        return None
+    settings = settings_of(runs, folds, label_source, enforce_min)
 
     both = {}
-    for label, (this_cost, this_min) in ((RAW, (None, None)),
-                                         (DECODED, (cost, min_duration))):
+    for label, (this_cost, this_min) in passes_of(settings):
         both[label] = _report_one(label, out_dir / label, folds, this_cost, this_min,
-                                  fps, event_iou, draws, int(cfg.seed), plot_cfg, runs,
-                                  per_page)
+                                  settings["fps"], settings["event_iou"], draws,
+                                  settings["seed"], settings["plot_cfg"], runs, per_page)
 
-    _compare(both, out_dir, plot_cfg)
+    _compare(both, out_dir, settings["plot_cfg"])
     return both[DECODED]
+
+
+def durations_only(runs: Path, out_dir: Path | None = None, label_source: str | None = None,
+                   enforce_min: bool | None = None) -> bool:
+    """Just the duration reports, for both passes - no bootstrap, no subsets, no panels.
+
+    The point is re-reporting a finished run after the duration metric changes, on a machine
+    that is probably training something else: the expensive parts of `aggregate` say nothing
+    about durations and there is no reason to pay for them again.
+    """
+    runs = Path(runs)
+    out_dir = Path(out_dir) if out_dir else runs
+    folds = load_run(runs)
+    if not folds:
+        return False
+    settings = settings_of(runs, folds, label_source, enforce_min)
+    ensemble, windows = ensemble_of(folds)
+    for label, (this_cost, this_min) in passes_of(settings):
+        target = out_dir / label
+        target.mkdir(parents=True, exist_ok=True)
+        print(f"\n{'=' * 20} {label} {'=' * 20}")
+        duration_reports(runs, target, ensemble, windows, this_cost, this_min,
+                         settings["event_iou"], settings["plot_cfg"])
+        print(f"  -> {target}/")
+    return True
+
+
+SPAN_ERRORS = "span_duration_errors"
+SPAN_AGREEMENT = "span_duration_agreement"
+SIGNAL_MEDIANS = "signal_duration_medians"
+SIGNAL_AGREEMENT = "signal_duration_agreement"
+SPAN_FIGURE = "span_durations"
+SIGNAL_FIGURE = "signal_durations"
+DURATION_TABLES = (SPAN_ERRORS, SPAN_AGREEMENT, SIGNAL_MEDIANS, SIGNAL_AGREEMENT)
+DURATION_FIGURES = (SPAN_FIGURE, SIGNAL_FIGURE)
+
+PASSES = (RAW, DECODED)
+AGGREGATE_FIGURES = ("fold_report", "per_patient", "fold_scaling", *DURATION_FIGURES)
+AGGREGATE_TABLES = ("per_fold", "ensemble_metrics", "per_patient", "fold_scaling",
+                    *DURATION_TABLES)
+"""What gets uploaded, named here rather than in `train.py` - a report that grows an output and an
+uploader that lists them by hand drift apart silently, and the missing figure is only noticed when
+somebody looks for it in ClearML.
+
+`durations` and `duration_agreement` are written to disk and deliberately **not** uploaded. That
+figure is the mean span length of a whole window, taken over the spans the window boundary cut, so
+it carries the length of every fragment. `span_durations` and `signal_durations` measure the same
+thing without them and split it into the per-breath and per-recording questions."""
+
+
+def duration_items(runs: Path, ensemble: dict, windows, cost, min_duration) -> list[dict]:
+    """One entry per test window: the two label arrays, and which recording it came from.
+
+    The signal id is not in the saved logits - it comes off the dataset manifest - and a window
+    without it is dropped from the per-signal view rather than being pooled under a made-up key.
+    """
+    found = provenance_for(runs, ensemble["window_id"], ensemble["env"])
+    items = []
+    for index, window_id in enumerate(ensemble["window_id"].tolist()):
+        key = (str(ensemble["env"][index]), int(window_id))
+        if key not in found:
+            continue
+        logits, truth = windows[index]
+        items.append({durations.LABEL: truth,
+                      durations.MODEL: decode(logits, cost, min_duration),
+                      "fps": float(ensemble["fps"][index]),
+                      "env": key[0], "window_id": key[1],
+                      "signal": found[key]["signal"],
+                      "patient": str(ensemble["patient"][index])})
+    return items
+
+
+def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, min_duration,
+                     event_iou: float, plot_cfg) -> None:
+    """Time spent in each phase, per breath and per recording - what the network is *for*.
+
+    Separate from `duration_agreement` above, which compares the mean span length of a whole
+    window. That mean is taken over spans the window boundary cut, so it carries the length of
+    every fragment; these two exclude them and are the numbers to read.
+    """
+    items = duration_items(runs, ensemble, windows, cost, min_duration)
+    if not items:
+        print("no test window could be traced to a signal - skipping the duration reports")
+        return
+
+    pairs, coverage = durations.span_errors(items, event_iou)
+    span_stats = durations.span_agreement(pairs, coverage)
+    pairs.to_csv(out_dir / f"{SPAN_ERRORS}.csv", index=False)
+    span_stats.to_csv(out_dir / f"{SPAN_AGREEMENT}.csv")
+    figures.span_duration_report(pairs, span_stats, out_dir / f"{SPAN_FIGURE}.png", plot_cfg)
+    print("\nper-span duration error, boundary-cut spans excluded:")
+    print("\n".join(durations.describe(span_stats, "spans")))
+
+    medians = durations.signal_medians(items)
+    signal_stats = durations.signal_agreement(medians)
+    medians.to_csv(out_dir / f"{SIGNAL_MEDIANS}.csv", index=False)
+    signal_stats.to_csv(out_dir / f"{SIGNAL_AGREEMENT}.csv")
+    figures.signal_duration_report(medians, signal_stats, out_dir / f"{SIGNAL_FIGURE}.png",
+                                   plot_cfg)
+    usable = int(medians[durations.USABLE].sum()) if len(medians) else 0
+    print(f"per-signal median duration, {usable} of {len(medians)} signal-phase pairs carry "
+          f"at least {durations.MIN_SPANS_PER_SIGNAL} spans on both sides:")
+    print("\n".join(durations.describe(signal_stats, "signals")))
 
 
 def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float,
@@ -359,7 +511,6 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
                 per_page: int) -> dict:
     """One complete report - `cost=None` is the network's raw argmax, no transitions, no floors."""
     out_dir.mkdir(parents=True, exist_ok=True)
-    reference = folds[0]
 
     # ---------------------------------------------------------------- per fold
     # Recomputed from each fold's own logits rather than read out of its test_metrics.csv: that
@@ -373,9 +524,7 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
     per_fold.to_csv(out_dir / "per_fold.csv")
 
     # ---------------------------------------------------------------- ensemble
-    stacked = np.stack([fold["logits"] for fold in folds])
-    ensemble = {**reference, "logits": stacked.mean(axis=0), "fold": "ensemble"}
-    windows = windows_of(ensemble)
+    ensemble, windows = ensemble_of(folds)
     metrics = score_windows(windows, cost, min_duration, fps, event_iou)
 
     patients = ensemble["patient"]
@@ -438,6 +587,8 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
             print(f"  {name:8s} bias {stats['bias_sec']:+.2f}s  MAE {stats['mae_sec']:.2f}s  "
                   f"({stats['relative_mae']:.0%})  limits {stats['loa_low']:+.2f} to "
                   f"{stats['loa_high']:+.2f}s  n={stats['n']}")
+
+    duration_reports(runs, out_dir, ensemble, windows, cost, min_duration, event_iou, plot_cfg)
     # Both passes get their own pages: seeing the same window decoded and undecoded is how the
     # post-processing is judged by eye rather than only by a metric.
     pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
@@ -482,10 +633,16 @@ def main() -> int:
     parser.add_argument("--enforce-min", choices=("auto", "on", "off"), default="auto",
                         help="minimum-duration pass. `auto` uses what the run decoded with; "
                              "anything else is an ablation and is printed as one")
+    parser.add_argument("--durations-only", action="store_true",
+                        help="only the phase-duration reports - skips the bootstrap, the fold "
+                             "subsets and the window panels")
     args = parser.parse_args()
     override = {"auto": None, "on": True, "off": False}[args.enforce_min]
-    return 0 if aggregate(Path(args.runs), args.out and Path(args.out),
-                          args.bootstrap, args.per_page, args.labels, override) else 1
+    out = args.out and Path(args.out)
+    if args.durations_only:
+        return 0 if durations_only(Path(args.runs), out, args.labels, override) else 1
+    return 0 if aggregate(Path(args.runs), out, args.bootstrap, args.per_page,
+                          args.labels, override) else 1
 
 
 if __name__ == "__main__":
