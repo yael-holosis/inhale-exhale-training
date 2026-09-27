@@ -18,6 +18,7 @@ there, not here.
 
 from __future__ import annotations
 
+import textwrap
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -702,6 +703,13 @@ def _coverage(row, unit: str) -> tuple[str, str]:
     return f"n={int(row['n'])} {unit}", ""
 
 
+CAPTION_CHARS_PER_INCH = 17
+"""Characters of an 8 pt caption per inch of figure width, for wrapping it to the grid."""
+
+CAPTION_LINE_HEIGHT = 0.022
+"""Figure fraction a wrapped caption line takes beyond the two the layout already leaves room for."""
+
+
 def _duration_grid(frame, stats, out_path: str | Path, heading: str, subtitle: str,
                    labelled_col: str, model_col: str, unit: str,
                    plot_cfg: Mapping[str, Any] | None = None) -> Path:
@@ -775,9 +783,12 @@ def _duration_grid(frame, stats, out_path: str | Path, heading: str, subtitle: s
             ax.legend(frameon=False, fontsize=7, labelcolor=INK_SOFT, loc="best")
 
     fig.suptitle(heading, fontsize=10.5, color=INK, x=0.008, ha="left", y=1.0)
-    fig.text(0.008, 0.968, subtitle, fontsize=8, color=INK_SOFT, ha="left", va="top",
+    # Wrapped to the grid, or one long caption line sets the saved width and leaves it half empty.
+    width = int(CAPTION_CHARS_PER_INCH * fig.get_figwidth())
+    wrapped = "\n".join(textwrap.fill(line, width) for line in subtitle.split("\n"))
+    fig.text(0.008, 0.968, wrapped, fontsize=8, color=INK_SOFT, ha="left", va="top",
              linespacing=1.5)
-    fig.tight_layout(rect=(0, 0, 1, 0.905))
+    fig.tight_layout(rect=(0, 0, 1, 0.905 - CAPTION_LINE_HEIGHT * (wrapped.count("\n") - 1)))
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
     plt.close(fig)
     return out_path
