@@ -100,3 +100,26 @@ def test_the_stop_as_exhale_tables_have_no_stop():
         assert not any("stop" in targets for targets in table.values())
         assert "inhale" in table["exhale"]
 
+
+def test_fill_turns_only_the_spans_beside_unknown():
+    from phase.decode import fill_beside_unknown
+
+    path = np.array([UNKNOWN] * 2 + [INHALE] * 3 + [EXHALE] * 4 + [INHALE] * 3 + [EXHALE] * 3)
+    out = fill_beside_unknown(path)
+    assert out[:5].tolist() == [UNKNOWN] * 5                   # an edge unknown fills its neighbour
+    assert out[5:].tolist() == path[5:].tolist()                # one pass: no cascade inward
+
+
+def test_fill_leaves_a_window_without_unknown_alone():
+    from phase.decode import fill_beside_unknown
+
+    path = np.array([INHALE] * 4 + [EXHALE] * 5 + [INHALE] * 4)
+    assert fill_beside_unknown(path).tolist() == path.tolist()
+
+
+def test_a_window_mostly_unknown_is_not_reported():
+    from phase.decode import reports
+
+    half = np.array([UNKNOWN] * 5 + [INHALE] * 5)
+    assert reports(half, 0.5) and not reports(np.r_[half, [UNKNOWN]], 0.5)
+    assert reports(np.full(10, UNKNOWN), None)

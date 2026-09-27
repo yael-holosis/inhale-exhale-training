@@ -325,7 +325,10 @@ def main() -> int:
                      "allowed": allowed_for(decoding, label_source,
                                             bool(model.hparams.get("stop_as_exhale", False))),
                      "enforce_min": bool(decoding.get("enforce_min")),
-                     "min_duration": dict(decoding["min_duration"])},
+                     "min_duration": dict(decoding["min_duration"]),
+                     # Reporting rules the run was trained under; absent keys mean it predates them.
+                     "fill_beside_unknown": bool(decoding.get("fill_beside_unknown", False)),
+                     "max_unknown_fraction": decoding.get("max_unknown_fraction")},
         "logit_tolerance": runner.LOGIT_TOLERANCE,
         # The palette travels rather than being read from `parameter/` at draw time: the figures
         # are drawn where the run happened, and Hydra is not on a device.

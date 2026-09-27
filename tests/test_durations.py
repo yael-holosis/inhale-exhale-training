@@ -182,3 +182,22 @@ def test_a_signal_ratio_is_unusable_when_either_phase_is():
                                      min_spans=3)
     row = table[table["phase"] == durations.RATIO].iloc[0]
     assert not bool(row[durations.USABLE])
+
+
+def test_pairing_sets_aside_the_reference_where_the_model_is_silent():
+    """A breath the model did not report is not compared - read off the prediction alone."""
+    labelled = window((INHALE, 5), (EXHALE, 6), (INHALE, 5), (EXHALE, 6))
+    model = labelled.copy()
+    model[11:16] = UNKNOWN                                      # the second inhale, unreported
+    out = durations.paired({durations.LABEL: labelled, durations.MODEL: model})
+    assert (out[durations.LABEL][11:16] == UNKNOWN).all()
+    assert out[durations.LABEL][:11].tolist() == labelled[:11].tolist()
+
+
+def test_a_run_without_the_reporting_keys_is_scored_as_it_was():
+    import report_folds as rf
+
+    assert rf.reporting_of({"viterbi": True}) is None
+    rules = rf.reporting_of({"fill_beside_unknown": True, "max_unknown_fraction": 0.5})
+    assert rules == {"fill_beside_unknown": True, "max_unknown_fraction": 0.5}
+    assert rf.reporting_for(rf.RAW, {"reporting": rules}) is None

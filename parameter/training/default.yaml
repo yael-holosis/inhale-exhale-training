@@ -46,6 +46,15 @@ decoding:
   switch_penalty: 2.0
   # Samples at 10 fps. Only read when `enforce_min` is on.
   min_duration: {unknown: 1, inhale: 3, exhale: 3, stop: 2}
+  # Reporting rules, applied to the decoded labels before any duration is reported. They read
+  # the prediction only, so a device can apply them. Derived in notebooks/recording_outliers.ipynb.
+  # A span beside a predicted `unknown` becomes `unknown`: it ends where the model gave up, not
+  # where the breath did. One pass, before the edge rule, so an edge `unknown` fills its neighbour.
+  fill_beside_unknown: true
+  # A window whose decoded labels are more than this fraction `unknown` reports nothing. From the
+  # validation windows: above 0.5 its breaths are twice as wrong as a clean window's (2.06x; test
+  # 2.03x), at a cost of about 1% of breaths. Null disables.
+  max_unknown_fraction: 0.5
   # Which class may follow which. Describes the LABEL SET, not physiology, so there is one table
   # per source - a table from the wrong one forbids transitions the labels are full of, and
   # Viterbi then bridges them with a one-sample `unknown` on every breath.

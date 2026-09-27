@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from phase.labels import PHASES, classes_of
+from phase.labels import PHASES, UNKNOWN, classes_of, targets_to_spans
 
 
 def transition_matrix(allowed: dict[str, list[str]], switch_penalty: float,
@@ -83,6 +83,30 @@ def enforce_min_duration(path: np.ndarray, minimum: dict[str, int],
         path[starts[run]:ends[run]] = path[starts[run - 1]] if before >= after \
             else path[starts[run + 1]]
     return path
+
+
+def fill_beside_unknown(path: np.ndarray) -> np.ndarray:
+    """A span beside `unknown` becomes `unknown` too - its end is where the model gave up.
+
+    One pass over the input, so it never cascades: a span two away from `unknown` survives.
+    """
+    path = np.asarray(path, dtype=np.int64)
+    out = path.copy()
+    spans = targets_to_spans(path)
+    for index, span in enumerate(spans):
+        if span["phase"] == PHASES[UNKNOWN]:
+            continue
+        beside = (spans[i]["phase"] for i in (index - 1, index + 1) if 0 <= i < len(spans))
+        if PHASES[UNKNOWN] in beside:
+            out[span["start"]:span["end"]] = UNKNOWN
+    return out
+
+
+def reports(path: np.ndarray, max_unknown_fraction: float | None) -> bool:
+    """Whether a window is reported at all: not when the model abstains on most of it."""
+    if max_unknown_fraction is None or not len(path):
+        return True
+    return float(np.mean(np.asarray(path) == UNKNOWN)) <= max_unknown_fraction
 
 
 def decode(logits: np.ndarray, cost: np.ndarray | None = None,

@@ -66,6 +66,21 @@ MIN_SPANS_PER_SIGNAL = 3
 unusable rather than dropped silently."""
 
 
+def paired(item: dict, share: float = 0.5) -> dict:
+    """The labelled reference set aside wherever the model reports nothing.
+
+    A labelled span lying mostly under the model's `unknown` is not compared: otherwise each
+    recording puts the model's surviving breaths against all of the labeller's - two different
+    sets. Read off the prediction, so nothing here selects breaths by their labels.
+    """
+    labels = np.asarray(item[LABEL], dtype=np.int64).copy()
+    silent = np.asarray(item[MODEL]) == UNKNOWN
+    for span in targets_to_spans(labels):
+        if span["phase"] != PHASES[UNKNOWN] and silent[span["start"]:span["end"]].mean() > share:
+            labels[span["start"]:span["end"]] = UNKNOWN
+    return {**item, LABEL: labels}
+
+
 def interior_spans(labels: np.ndarray, phase: str | None = None) -> list[dict]:
     """The called spans of one window that the window boundary did not cut."""
     labels = np.asarray(labels)

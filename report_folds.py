@@ -36,7 +36,7 @@ from omegaconf import OmegaConf
 from models.lightning_module import allowed_for
 from phase import durations, figures
 from phase.building import load_windows, shard_path, stop_as_exhale
-from phase.decode import decode, transition_matrix
+from phase.decode import decode, fill_beside_unknown, reports, transition_matrix
 from phase.labels import PHASES, UNKNOWN, classes_of
 from phase.labelsources import ALGORITHM
 from phase.metrics import (duration_agreement, duration_pairs, event_level,
@@ -363,14 +363,16 @@ def settings_of(runs: Path, folds: list[dict], label_source: str | None,
     allowed = allowed_for(decoding, source, merged)
     print(f"labels.source = {source}, stop_as_exhale = {merged}, "
           f"switch_penalty = {decoding['switch_penalty']}, "
-          f"enforce_min = {decoding['enforce_min']}, transition table = {allowed}")
+          f"enforce_min = {decoding['enforce_min']}, transition table = {allowed}, "
+          f"reporting rules = {reporting_of(decoding)}")
     classes = classes_of(folds[0]["logits"].shape[1])
     cost = (transition_matrix(allowed, decoding["switch_penalty"], classes)
             if decoding["viterbi"] else None)
     return {"cost": cost,
             "min_duration": decoding["min_duration"] if decoding["enforce_min"] else None,
             "event_iou": event_iou, "fps": float(np.median(folds[0]["fps"])),
-            "plot_cfg": OmegaConf.to_container(cfg.plot, resolve=True), "seed": int(cfg.seed)}
+            "plot_cfg": OmegaConf.to_container(cfg.plot, resolve=True), "seed": int(cfg.seed),
+            "reporting": reporting_of(decoding)}
 
 
 def ensemble_of(folds: list[dict]) -> tuple[dict, list]:
@@ -382,6 +384,23 @@ def ensemble_of(folds: list[dict]) -> tuple[dict, list]:
     stacked = np.stack([fold["logits"] for fold in folds])
     ensemble = {**folds[0], "logits": stacked.mean(axis=0), "fold": "ensemble"}
     return ensemble, windows_of(ensemble)
+
+
+FILL = "fill_beside_unknown"
+MAX_UNKNOWN = "max_unknown_fraction"
+
+
+def reporting_of(decoding: dict) -> dict | None:
+    """The reporting rules the run was configured with. None for a run that predates them, so an
+    old run is re-scored exactly as it was reported."""
+    if FILL not in decoding and MAX_UNKNOWN not in decoding:
+        return None
+    return {FILL: bool(decoding.get(FILL, False)), MAX_UNKNOWN: decoding.get(MAX_UNKNOWN)}
+
+
+def reporting_for(label: str, settings: dict) -> dict | None:
+    """The rules are post-processing, so only the decoded pass gets them - `raw` is the net alone."""
+    return settings["reporting"] if label == DECODED else None
 
 
 def passes_of(settings: dict) -> tuple[tuple[str, tuple], ...]:
@@ -410,7 +429,8 @@ def aggregate(runs: Path, out_dir: Path | None = None, draws: int = 2000,
     for label, (this_cost, this_min) in passes_of(settings):
         both[label] = _report_one(label, out_dir / label, folds, this_cost, this_min,
                                   settings["fps"], settings["event_iou"], draws,
-                                  settings["seed"], settings["plot_cfg"], runs, per_page)
+                                  settings["seed"], settings["plot_cfg"], runs, per_page,
+                                  reporting_for(label, settings))
 
     _compare(both, out_dir, settings["plot_cfg"])
     return both[DECODED]
@@ -436,11 +456,13 @@ def durations_only(runs: Path, out_dir: Path | None = None, label_source: str | 
         target.mkdir(parents=True, exist_ok=True)
         print(f"\n{'=' * 20} {label} {'=' * 20}")
         duration_reports(runs, target, ensemble, windows, this_cost, this_min,
-                         settings["event_iou"], settings["plot_cfg"])
+                         settings["event_iou"], settings["plot_cfg"],
+                         reporting_for(label, settings))
         print(f"  -> {target}/")
     return True
 
 
+REPORTED = "reported_of_all_labelled"
 SPAN_ERRORS = "span_duration_errors"
 SPAN_AGREEMENT = "span_duration_agreement"
 SIGNAL_MEDIANS = "signal_duration_medians"
@@ -464,11 +486,15 @@ it carries the length of every fragment. `span_durations` and `signal_durations`
 thing without them and split it into the per-breath and per-recording questions."""
 
 
-def duration_items(runs: Path, ensemble: dict, windows, cost, min_duration) -> list[dict]:
+def duration_items(runs: Path, ensemble: dict, windows, cost, min_duration,
+                   reporting: dict | None = None) -> list[dict]:
     """One entry per test window: the two label arrays, and which recording it came from.
 
     The signal id is not in the saved logits - it comes off the dataset manifest - and a window
     without it is dropped from the per-signal view rather than being pooled under a made-up key.
+
+    With `reporting`, the rules a device would apply: a window over the unknown share reports
+    nothing, spans beside `unknown` are filled, and the reference is paired to what is reported.
     """
     found = provenance_for(runs, ensemble["window_id"], ensemble["env"])
     items = []
@@ -477,24 +503,29 @@ def duration_items(runs: Path, ensemble: dict, windows, cost, min_duration) -> l
         if key not in found:
             continue
         logits, truth = windows[index]
-        items.append({durations.LABEL: truth,
-                      durations.MODEL: decode(logits, cost, min_duration),
-                      "fps": float(ensemble["fps"][index]),
-                      "env": key[0], "window_id": key[1],
-                      "signal": found[key]["signal"],
-                      "patient": str(ensemble["patient"][index])})
+        prediction = decode(logits, cost, min_duration)
+        if reporting and not reports(prediction, reporting[MAX_UNKNOWN]):
+            continue
+        if reporting and reporting[FILL]:
+            prediction = fill_beside_unknown(prediction)
+        item = {durations.LABEL: truth, durations.MODEL: prediction,
+                "fps": float(ensemble["fps"][index]),
+                "env": key[0], "window_id": key[1],
+                "signal": found[key]["signal"],
+                "patient": str(ensemble["patient"][index])}
+        items.append(durations.paired(item) if reporting else item)
     return items
 
 
 def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, min_duration,
-                     event_iou: float, plot_cfg) -> None:
+                     event_iou: float, plot_cfg, reporting: dict | None = None) -> None:
     """Time spent in each phase, per breath and per recording - what the network is *for*.
 
     Separate from `duration_agreement` above, which compares the mean span length of a whole
     window. That mean is taken over spans the window boundary cut, so it carries the length of
     every fragment; these two exclude them and are the numbers to read.
     """
-    items = duration_items(runs, ensemble, windows, cost, min_duration)
+    items = duration_items(runs, ensemble, windows, cost, min_duration, reporting)
     if not items:
         print("no test window could be traced to a signal - skipping the duration reports")
         return
@@ -503,7 +534,19 @@ def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, m
 
     pairs, coverage = durations.span_errors(items, event_iou, classes)
     span_stats = durations.span_agreement(pairs, coverage, columns)
-
+    if reporting:
+        # Against every labelled breath, not only the paired ones: a rule that drops hard breaths
+        # always looks better on the breaths it keeps, and this is what it cost.
+        everything = duration_items(runs, ensemble, windows, cost, min_duration)
+        for phase in durations.MEASURED:
+            if phase in span_stats.index:
+                labelled = sum(len(durations.interior_spans(i[durations.LABEL], phase))
+                               for i in everything)
+                span_stats.loc[phase, REPORTED] = (span_stats.loc[phase, "matched_spans"] / labelled
+                                                   if labelled else np.nan)
+        print(f"\nreporting rules {reporting}: " + ", ".join(
+            f"{phase} {span_stats.loc[phase, REPORTED]:.0%}" for phase in durations.MEASURED
+            if phase in span_stats.index) + " of labelled breaths reported and matched")
     pairs.to_csv(out_dir / f"{SPAN_ERRORS}.csv", index=False)
     span_stats.to_csv(out_dir / f"{SPAN_AGREEMENT}.csv")
     figures.span_duration_report(pairs, span_stats, out_dir / f"{SPAN_FIGURE}.png", plot_cfg)
@@ -524,7 +567,7 @@ def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, m
 
 def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float,
                 event_iou: float, draws: int, seed: int, plot_cfg, runs: Path,
-                per_page: int) -> dict:
+                per_page: int, reporting: dict | None = None) -> dict:
     """One complete report - `cost=None` is the network's raw argmax, no transitions, no floors."""
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -605,7 +648,8 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
                   f"({stats['relative_mae']:.0%})  limits {stats['loa_low']:+.2f} to "
                   f"{stats['loa_high']:+.2f}s  n={stats['n']}")
 
-    duration_reports(runs, out_dir, ensemble, windows, cost, min_duration, event_iou, plot_cfg)
+    duration_reports(runs, out_dir, ensemble, windows, cost, min_duration, event_iou, plot_cfg,
+                     reporting)
     # Both passes get their own pages: seeing the same window decoded and undecoded is how the
     # post-processing is judged by eye rather than only by a metric.
     pages = draw_every_window(runs, out_dir, ensemble, windows, cost, min_duration,
