@@ -34,7 +34,7 @@ from phase.decode import decode
 from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
 from phase.labels import classes_for, classes_of
 from phase.preprocess import normalise_window
-from phase.splits import SPLIT_COLUMN, describe, split_for
+from phase.splits import SPLIT_COLUMN, describe, split_for, subsample_patients
 from report_folds import (AGGREGATE_FIGURES, AGGREGATE_TABLES, PASSES, PAGES_DIR,
                           aggregate)
 
@@ -138,6 +138,14 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
     # Read off the columns, never recomputed here: the split that trained a model has to be the
     # one recorded beside the data, not whatever the config happens to say at run time.
     splits = split_for(manifest, fold)
+    fraction = float(cut.get("train_fraction", 1.0))
+    if fraction < 1.0:
+        full = splits["train"]
+        splits["train"] = subsample_patients(full, fraction, cut.group_columns, cut.stratify_cols,
+                                             cut.seed + fold)
+        print(f"train_fraction {fraction:g}: {splits['train']['PatientID'].nunique()} of "
+              f"{full['PatientID'].nunique()} training patients, {len(splits['train'])} of "
+              f"{len(full)} windows")
     print(f"dataset {dataset}\nfold {fold} of {cut.folds}, test held out of every fold\n"
           + describe(splits, total=len(manifest), stratify_cols=cut.stratify_cols))
 

@@ -181,6 +181,25 @@ def make_splits(frame: pd.DataFrame, cfg, ) -> pd.DataFrame:
                         int(cfg["seed"]))
 
 
+def subsample_patients(frame: pd.DataFrame, fraction: float, group_columns, stratify_cols,
+                       seed: int) -> pd.DataFrame:
+    """Keep `fraction` of the patients in each stratum, for a learning curve.
+
+    Every patient gets one draw from `seed`, independent of `fraction`, and each stratum keeps its
+    lowest draws - so a smaller fraction is always a subset of a larger one.
+    """
+    if fraction >= 1.0:
+        return frame
+    frame = with_study(frame)
+    table = group_table(frame, group_columns, stratify_cols)
+    table["draw"] = np.random.default_rng(seed).random(len(table))
+    kept = set()
+    for _, stratum in table.groupby("stratum"):
+        count = max(1, int(round(fraction * len(stratum))))
+        kept.update(stratum.sort_values("draw")["key"].head(count))
+    return frame[patient_key(frame, group_columns).isin(kept)]
+
+
 def split_for(frame: pd.DataFrame, fold: int) -> dict[str, pd.DataFrame]:
     """The three sides of one fold, read off the columns rather than recomputed."""
     column = FOLD_COLUMN.format(fold=fold)

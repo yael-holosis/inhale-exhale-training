@@ -223,3 +223,14 @@ def test_window_ids_collide_across_instances_so_splits_carry_on_the_pair(tmp_pat
 
     rebuilt = read_windows(tmp_path)
     assert len(rebuilt) == len(manifest), "a colliding id must not duplicate rows"
+
+
+def test_a_learning_curve_subset_is_nested_and_keeps_every_stratum(frame):
+    from phase.splits import STUDY_COLUMN, patient_key, subsample_patients, with_study
+
+    groups, strata = ["env", "PatientID"], [STUDY_COLUMN]
+    small = subsample_patients(frame, 0.25, groups, strata, 3)
+    large = subsample_patients(frame, 0.5, groups, strata, 3)
+    assert set(patient_key(small, groups)) < set(patient_key(large, groups))
+    assert set(with_study(small)[STUDY_COLUMN]) == set(with_study(frame)[STUDY_COLUMN])
+    assert subsample_patients(frame, 1.0, groups, strata, 3) is frame

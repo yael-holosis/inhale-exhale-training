@@ -62,6 +62,9 @@ split:
   # Balanced across test and folds. `study` is the patient-name prefix (SL, HOL, bs) - a study
   # is a recruitment criterion, so it carries a pathology mix. Empty disables stratification.
   stratify_cols: [study]
+  # Share of each fold's training patients actually trained on, per stratum, nested across values.
+  # For a learning curve only; validation and test are untouched. 1.0 trains on all of them.
+  train_fraction: 1.0
 
 # Null keeps each window its own length - the net is fully convolutional and collate pads per
 # batch. A crop drops the long windows, which are the hard ones.
