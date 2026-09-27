@@ -228,7 +228,8 @@ def draw_every_window(runs: Path, out_dir: Path, ensemble: dict, windows, cost, 
                       "title": (f"{ensemble['patient'][index]} · {ensemble['env'][index]} · "
                                 f"signal {found['signal']} · session {found['session']} · "
                                 f"window {int(window_id)} (index {found['window_index']}) · "
-                                f"macro F1 {figures.score(prediction, truth):.2f}")})
+                                f"{figures.SCORE_LABEL} "
+                                f"{figures.score(prediction, truth):.2f}")})
 
     pages_dir = Path(out_dir) / PAGES_DIR
     written = []

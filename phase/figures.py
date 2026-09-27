@@ -203,8 +203,22 @@ def choose(scored: list[dict[str, Any]], n: int, how: str = SPREAD,
     return [ranked[position] for position in dict.fromkeys(positions)]
 
 
+SCORE_LABEL = "accuracy"
+"""What a panel title and the window picks are scored by."""
+
+
 def score(prediction: np.ndarray, reference: np.ndarray) -> float:
-    """Macro F1 over the called classes - the number the panel title carries."""
+    """Accuracy - the number the panel title carries and the picks rank by.
+
+    Not macro F1: on one window a class present for a single sample enters the macro average at
+    zero, so a window 96% right scored 0.64. Pooled scores keep macro F1.
+    """
+    prediction, reference = np.asarray(prediction), np.asarray(reference)
+    return float(np.mean(prediction == reference)) if reference.size else 0.0
+
+
+def macro_f1(prediction: np.ndarray, reference: np.ndarray) -> float:
+    """Macro F1 over the classes in play, for a caller that records it under that name."""
     return float(per_sample(prediction, reference)["macro_f1"])
 
 

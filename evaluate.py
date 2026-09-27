@@ -114,7 +114,7 @@ def draw(items: list[dict], out_dir: Path, name: str, heading: str, how: str, n:
     panels = [{**item,
                "title": (f"{item['row']['PatientID']} · window "
                          f"{int(item['row']['RespirationWindowID'])} · "
-                         f"{item['row']['env']} · macro F1 {item['score']:.2f}")}
+                         f"{item['row']['env']} · {figures.SCORE_LABEL} {item['score']:.2f}")}
               for item in chosen]
     return figures.plot_windows(panels, Path(out_dir) / name, heading, reference_name,
                                 plot_cfg)
@@ -146,7 +146,7 @@ def on_fold(args, cfg) -> int:
     # is all `unknown`, so any phase the model calls there scores zero by construction - pooling
     # those with the rest reports a disagreement with an absent opinion as a modelling error.
     labelled = np.array([bool(item["row"]["n_spans"] > 0) for item in items])
-    print(f"\nper-window macro F1 over {len(scores)} test windows: "
+    print(f"\nper-window {figures.SCORE_LABEL} over {len(scores)} test windows: "
           f"median {np.median(scores):.2f}, worst {scores.min():.2f}, best {scores.max():.2f}")
     if labelled.any():
         print(f"  reference has phases ({labelled.sum():4d} windows): "

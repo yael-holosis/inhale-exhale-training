@@ -248,3 +248,14 @@ def test_an_absent_class_leaves_the_balance_of_the_others_alone():
     assert weights[:3].tolist() == pytest.approx(alone.tolist())
     assert weights[3] == 1.0
 
+
+def test_a_one_sample_sliver_does_not_sink_a_window_score():
+    """Window 61 of signal 1570218: one labelled `unknown` sample took macro F1 to 0.64."""
+    from phase import figures
+
+    reference = np.r_[[0], np.tile(np.r_[np.full(20, INHALE), np.full(30, EXHALE)], 4)[:199]]
+    prediction = reference.copy()
+    prediction[0] = INHALE
+    assert figures.score(prediction, reference) == pytest.approx(0.995)
+    assert figures.macro_f1(prediction, reference) < 0.7
+

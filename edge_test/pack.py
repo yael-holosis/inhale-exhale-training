@@ -289,7 +289,7 @@ def main() -> int:
         logits, prediction = answer(model, values, args.normalise)
         items.append({"values": values, "reference": reference, "logits": logits,
                       "prediction": prediction, "row": row,
-                      "score": figures.score(prediction, reference)})
+                      "score": figures.macro_f1(prediction, reference)})
     chosen = figures.choose(items, args.n, args.pick, args.seed)
 
     folder = Path(__file__).absolute().parent

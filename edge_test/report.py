@@ -311,14 +311,12 @@ def latency_figure(out_dir: Path, timings: list[dict], results: dict, seconds: f
 def prediction_pages(out_dir: Path, items: list[dict], results: dict, plot_cfg,
                      reference_name: str) -> list[Path]:
     """The device's own labels against the reference, `phase.figures` doing the drawing."""
-    scored = {row["window_id"]: row for row in results["windows"]}
     panels = []
     for item in items:
-        score = scored.get(item["window_id"], {}).get(
-            "macro_f1", figures.score(item["prediction"], item["reference"]))
+        score = figures.score(item["prediction"], item["reference"])
         panels.append({**item, "score": score,
                        "title": (f"{item['patient']} · window {item['window_id']} · "
-                                 f"{item['env']} · macro F1 {score:.2f}")})
+                                 f"{item['env']} · {figures.SCORE_LABEL} {score:.2f}")})
     panels.sort(key=lambda panel: panel["score"])
 
     pages = []

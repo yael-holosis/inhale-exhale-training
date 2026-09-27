@@ -126,7 +126,7 @@ def score_run(run: Path, dataset: Path, manifest: pd.DataFrame,
             prediction = decode(logits.permute(1, 0).numpy(), judge.cost, judge.min_duration)
             rows.append({
                 "role": role, "loss": loss,
-                "macro_f1": figures.score(prediction, target),
+                "macro_f1": figures.macro_f1(prediction, target),
                 "label_unknown": float((target == UNKNOWN).mean()),
                 "model_unknown": float((prediction == UNKNOWN).mean()),
                 "inhale_rises": polarity(values, target),

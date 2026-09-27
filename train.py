@@ -117,7 +117,7 @@ def test_figure(cfg: DictConfig, items: list[dict], run_dir: Path,
         return None
     panels = [{**item, "title": (f"{item['row']['PatientID']} · window "
                                  f"{int(item['row']['RespirationWindowID'])} · "
-                                 f"{item['row']['env']} · macro F1 {item['score']:.2f}")}
+                                 f"{item['row']['env']} · {figures.SCORE_LABEL} {item['score']:.2f}")}
               for item in chosen]
     return figures.plot_windows(
         panels, run_dir / "test_windows.png",
