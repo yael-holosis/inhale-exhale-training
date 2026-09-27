@@ -568,6 +568,115 @@ A student cannot beat its teacher by imitating it. If the first row is not at le
 the network has not earned its place yet. The human set is small, so read it as a sanity check
 rather than a verdict.
 
+## Running it on a device
+
+`edge_test/` **is** the folder that goes to the device. Four tracked files - `run_inference.py`
+(what the device runs), `pack.py` and `report.py` (what this machine runs), and a README -
+and `pack.py` fills the rest of it. There is no build directory and no second copy of the runner.
+
+```bash
+# 0. what is on the device? read-only, installs nothing
+poetry run python -m edge_test.pack --probe <ip>
+
+# 1. fill the folder from a checkpoint
+poetry run python -m edge_test.pack --checkpoint outputs/<date>/<time>/fold_0/checkpoints/best-epoch=NN.ckpt
+
+# 2. copy the folder over and run it there
+scp -r edge_test root@<ip>:/data/edge_test
+ssh root@<ip> 'cd /data/edge_test && /opt/env/bin/python run_inference.py --runs 10'
+
+# 3. bring the three artifacts back and draw them
+scp -r root@<ip>:<folder on the device>/out edge_test/
+```
+
+**The figures are drawn on the device, by the run** - matplotlib and pandas are `holosissystem`
+dependencies, so there is no reason to make somebody copy numbers to a laptop to see a histogram. A
+run writes to `out/` inside the folder, on whichever machine ran it: `results.json`, `timings.csv`,
+`predictions.npz`, a copy of `manifest.json`, and `out/report/<the run's stamp>/` holding the plot,
+the per-window table, the prediction pages and a copy of the run they describe. So the round trip is
+one recursive copy of `out/` and it brings the figures with it. `out/report/index.csv` carries one row
+per run - threads, net p50 / p95 / max, macro F1, pass, checkpoint - for comparing them.
+
+If matplotlib turns out to be missing, the run says so and its data is still complete;
+`report.py --from <dir>` draws it anywhere else, and `--no-figures` skips drawing on purpose.
+
+`pack.py` deletes `out/` when it re-packs, which is what stops a report made here from being copied
+to a device and read there as the device's own output. Re-pack before copying the folder over; copy a
+device's `out/` off before re-packing. The manifest travels with the run, so a returned run names its
+own checkpoint and dataset and re-packing cannot relabel a past report.
+
+The device runs `holosissystem`, which installs python 3.12, numpy and **torch 2.9.1** - the same
+torch this repo trains with - into `/opt/env` (or `/data/env` on the older layout). Nothing else
+here is on it: no Lightning, no Hydra, no ClearML, no database layer. `--probe` reports which
+interpreter exists and what versions it carries.
+
+### It is a test, not a demo
+
+`pack.py` records the host's own logits beside every waveform, and the device has to reproduce
+them - on **every** run, so nondeterminism cannot hide behind the first one. A wrong BLAS, a
+truncated file or a different torch shows up as a logit difference rather than as a slightly worse
+F1 nobody can interpret. Exit status is 0 only if every window matches inside
+`edge_test/run_inference.py: LOGIT_TOLERANCE` **and** decodes to the same labels.
+
+One pass answers correctness and nothing about latency, so `--runs N` walks the whole set N times
+and keeps every measurement, and `--warmup N` throws away the passes where torch is still
+allocating. Three artifacts come back: `results.json` (the summary), `timings.csv` (one row per
+window per run - the distribution itself, nothing pre-aggregated) and `predictions.npz` (the labels
+the device decoded, beside the reference).
+
+`report.py` turns those into `latency.png`, the per-window table `latency_summary.csv`, and pages
+of the device's own predictions against the reference drawn by `phase.figures`, the same drawing the
+training run makes. It also copies the three device files in beside the figures, so `report/` is the
+whole story on its own. Nothing is recomputed on this machine.
+
+**Everything reported is the network alone.** `forward_ms` times normalisation and the forward
+pass; `decode_ms` times the decoder separately. The figure, the summary table and the index all
+carry the net, because the two are separate concerns with separate fixes and a report that mixes
+them invites reading one number as the other. `timings.csv` still holds all three columns - it is
+the raw data and loses nothing.
+
+That separation is not cosmetic. On this laptop the decoder is 5% of the forward pass; on the
+device it is 69% of it, because Viterbi is a Python loop over samples (`phase/decode.py`) making
+about a thousand tiny numpy calls per window, and only one of the two paths is hurt by a slow
+interpreter. A scalar rewrite of that loop measures 3.2x faster with an identical path, which is
+where to look if the decoder ever has to be cheaper.
+
+### Which windows get packed
+
+From the **held-out** split of the dataset the checkpoint was trained on, read from the
+`dataset.txt` that `train.py` writes beside every fold - so the test is never on training data, and
+`latest` cannot quietly point it somewhere else. Two filters, both on by default:
+
+- **One duration only** (`--seconds 20`). The net is fully convolutional, so a 25 s window costs
+  25% more than a 20 s one; over mixed lengths the spread that comes out is the dataset's, not the
+  device's. 186 of the 228 held-out windows are exactly 20 s.
+- **No all-unknown windows** (`--all-unknown` keeps them). A window the reference left entirely
+  unknown scores 1.00 or near zero on the one class in play, so in a set of ten it spends a slot
+  saying nothing about whether the phases came out right.
+
+`--pick spread` (the default) then takes the worst, the median and the best of what is left.
+
+### The generated part of the folder
+
+`weights.pt` (the U-Net's state dict, the Lightning checkpoint unwrapped because Lightning is not
+on the device), `waveforms/`, `manifest.json`, and copies of `phase/{labels,decode,metrics,
+preprocess}.py` and `models/unet1d.py` - the modules that decide the numerics, copied byte for byte
+at pack time rather than reimplemented. `edge_test/run_inference.py: MODULES` is the list, all of it
+is gitignored, and `tests/test_edge_bundle.py` enforces that nothing the device runs imports
+something it lacks, that every first-party import also travels, and that the folder gains no
+tracked file behind your back. `phase/dataset.py` is the near miss: four lines of numpy and a
+pandas frame, and it reaches the database layer through `phase.building`.
+
+Measured on the device (`imx8mp-sr-som`, aarch64, torch 2.9.1+cpu, 4 threads), 10 windows x 10
+runs, 18,188 parameters, **net forward**: 29.6 ms median per 20 s window, p95 31.4, p99 54.3, max
+65.0 - 676x real time at the median. The decoder adds 20.5 ms on top. Logits reproduced the host to
+2.9e-06, so the device runs the same model.
+
+The distribution is tight - sd 4.4 ms driven almost entirely by three measurements past 36.8 ms -
+which is what a dedicated core looks like. A laptop figure is not a substitute: the same run here
+is about 4x faster on the net and 40x faster on the decoder, and the second of those ratios is the
+one that changes a design decision.
+
 ## Layout
 
 The repo root holds only things you can run.
@@ -590,7 +699,11 @@ it was checked window for window against that implementation before the dependen
 (60/60 identical labels on real windows). If the upstream phase code changes, that file has to
 follow it.
 - `models/` - `unet1d`, `lightning_module`.
-- `tests/` - 46 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
+- `edge_test/` - the folder that goes to the device, and the only copy of what runs there:
+  `run_inference.py` (the device entrypoint), `pack.py` (fills the folder, `--probe` inspects a
+  device), `report.py` (the figures, on the host). `pack.py` writes the payload into the folder
+  itself, so there is no build directory duplicating the code.
+- `tests/` - 169 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
   for a smoke run:
 
 ```bash

@@ -33,6 +33,7 @@ from phase.building import shard_path, load_windows, resolve
 from phase.decode import decode
 from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
 from phase.labels import PHASES
+from phase.preprocess import normalise_window
 from phase.splits import SPLIT_COLUMN, describe, split_for
 from report_folds import (AGGREGATE_FIGURES, AGGREGATE_TABLES, PASSES, PAGES_DIR,
                           aggregate)
@@ -78,9 +79,7 @@ def test_predictions(model, dataset: Path, test: pd.DataFrame) -> list[dict]:
             start, end = stored["offsets"][position], stored["offsets"][position + 1]
             values = stored["values"][start:end].astype(np.float32)
             reference = stored["targets"][start:end].astype(np.int64)
-        centred = values - values.mean()
-        scale = centred.std()
-        normalised = centred / scale if scale > 1e-8 else centred
+        normalised = normalise_window(values)
         with torch.no_grad():
             logits = model(torch.from_numpy(normalised[None, None, :]))
         logits = logits[0].permute(1, 0).cpu().numpy()

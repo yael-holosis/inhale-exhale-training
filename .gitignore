@@ -14,3 +14,15 @@ clearml.conf
 # Nothing is read from here - credentials come from Secrets Manager. Never commit one.
 secrets/*
 !secrets/README.md
+
+# edge_test/ holds four tracked scripts; `pack.py` fills the rest of it and the device writes
+# back into it. The folder is the deliverable, so the payload lives beside the code rather than
+# in a build directory that would need a second copy of it.
+edge_test/weights.pt
+edge_test/manifest.json
+edge_test/waveforms/
+edge_test/results.json
+edge_test/timings.csv
+edge_test/predictions.npz
+edge_test/phase/
+edge_test/models/

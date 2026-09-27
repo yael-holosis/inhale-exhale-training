@@ -37,6 +37,7 @@ from torch.utils.data import Dataset, Sampler
 
 from phase.building import shard_path
 from phase.labels import UNKNOWN
+from phase.preprocess import normalise_window
 
 
 class WindowDataset(Dataset):
@@ -121,13 +122,7 @@ class WindowDataset(Dataset):
         return padded_values, padded_target, mask
 
     def _normalise(self, values: np.ndarray) -> np.ndarray:
-        if self.normalise != "window":
-            return values
-        centred = values - values.mean()
-        scale = centred.std()
-        # A flat window is a real thing (an apnoea, a lost bin). Dividing it by its own noise
-        # would amplify that noise into something that looks like breathing.
-        return centred / scale if scale > 1e-8 else centred
+        return normalise_window(values, self.normalise)
 
     # ------------------------------------------------------------------ augmentation
 

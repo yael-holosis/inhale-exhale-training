@@ -43,6 +43,9 @@ from phase.metrics import (duration_agreement, duration_pairs, event_level,
                            per_sample)
 from phase.splits import STUDY_COLUMN, study_of
 
+PARAMETER_DIR = Path(__file__).resolve().parent / "parameter"
+"""Resolved against this file, not the working directory - a notebook runs from `notebooks/`."""
+
 LOGITS_NAME = "test_logits.npz"
 METRICS_NAME = "test_metrics.csv"
 HEADLINE = "macro_f1"
@@ -333,7 +336,7 @@ def settings_of(runs: Path, folds: list[dict], label_source: str | None,
     run under a penalty, a transition table or a duration floor it never saw, and nothing in the
     report says the change happened.
     """
-    cfg = OmegaConf.load("parameter/config.yaml")
+    cfg = OmegaConf.load(PARAMETER_DIR / "config.yaml")
     run_cfg = config_of(runs)
     if run_cfg is not None and OmegaConf.select(run_cfg, "training.decoding") is not None:
         decoding = OmegaConf.to_container(run_cfg.training.decoding, resolve=True)
@@ -341,7 +344,7 @@ def settings_of(runs: Path, folds: list[dict], label_source: str | None,
     else:
         print(f"no .hydra config under {runs} - falling back to parameter/, which may have moved "
               f"since the run")
-        training = OmegaConf.load("parameter/training/default.yaml")
+        training = OmegaConf.load(PARAMETER_DIR / "training" / "default.yaml")
         decoding = OmegaConf.to_container(training.decoding, resolve=True)
         event_iou = float(training.event_iou)
     if enforce_min is not None and bool(enforce_min) != bool(decoding["enforce_min"]):

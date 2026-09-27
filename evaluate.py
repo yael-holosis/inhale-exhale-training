@@ -49,6 +49,7 @@ from phase.labels import PHASES, UNKNOWN, spans_to_targets
 from phase.building import existing_params, shard_path, load_windows, resolve
 from phase.corrections import Corrections
 from phase.metrics import event_level, per_sample, phase_durations
+from phase.preprocess import normalise_window
 from phase.splits import split_for
 
 CONFIG_DIR = Path(__file__).parent / "parameter"
@@ -65,10 +66,8 @@ def load_model(checkpoint: str) -> PhaseSegmenter:
 @torch.no_grad()
 def predict(model: PhaseSegmenter, values: np.ndarray) -> np.ndarray:
     """One window or one whole signal. Fully convolutional, so length does not matter."""
-    centred = np.asarray(values, dtype=np.float64) - np.mean(values)
-    scale = centred.std()
-    normalised = centred / scale if scale > 1e-8 else centred
-    logits = model(torch.from_numpy(normalised[None, None, :].astype(np.float32)))
+    normalised = normalise_window(values)
+    logits = model(torch.from_numpy(normalised[None, None, :]))
     return decode(logits[0].permute(1, 0).numpy(), model.cost, model.min_duration)
 
 

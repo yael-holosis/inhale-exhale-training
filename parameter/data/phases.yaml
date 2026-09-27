@@ -17,7 +17,7 @@ labels:
   # algorithm - production's own phase call, re-run. Every window, but imitation not truth.
   # human     - the spans a person drew. Fewer windows, the only measure of correctness.
   # A directory holds one source; the build refuses to mix them.
-  source: algorithm
+  source: human
 
   # human only. Null takes every labeller; an id takes one person alone.
   labeler_id: null
