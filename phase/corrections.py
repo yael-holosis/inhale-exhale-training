@@ -10,9 +10,11 @@ Nothing here reads the trace - a correction is a statement about the labelling o
     Only a span actually touching the edge: where the window already opens or closes with
     `unknown`, the labeller has said what they saw and nothing needs correcting.
 
-`merge_stop_into_exhale` - every `stop` sample becomes `exhale`, so the pause is part of the breath
-    out rather than a phase of its own. Applied first: the other corrections read the merged label
-    set. The decoder then needs the `stop_as_exhale` transition table.
+`merge_stop_into_exhale` - a pause that directly follows an exhale becomes `exhale`, so it is part of
+    the breath out rather than a phase of its own. A pause with no exhale before it - after
+    `unknown`, after an inhale, or at the window start - becomes `unknown`: there is no exhale for it
+    to continue. Applied first: the other corrections read the merged label set. The decoder then
+    needs the `stop_as_exhale` transition table.
 
 `all_unknown_above` - a window whose corrected target is more than this fraction `unknown` becomes
     entirely `unknown`. The fraction is measured **after** the edge spans are blanked, because
@@ -26,7 +28,7 @@ from typing import Any
 
 import numpy as np
 
-from phase.labels import EXHALE, STOP, UNKNOWN, targets_to_spans, touches_edge
+from phase.labels import EXHALE, PHASES, STOP, UNKNOWN, targets_to_spans, touches_edge
 
 BLANK_EDGE_SPANS = "blank_edge_spans"
 ALL_UNKNOWN_ABOVE = "all_unknown_above"
@@ -70,13 +72,23 @@ class Corrections:
         if not target.size:
             return target, False
         if self.merge_stop_into_exhale:
-            target[target == STOP] = EXHALE
+            target = merge_stops(target)
         if self.blank_edge_spans:
             target = blank_edges(target)
         if self.all_unknown_above is not None:
             if float((target == UNKNOWN).mean()) > self.all_unknown_above:
                 return np.full_like(target, UNKNOWN), True
         return target, False
+
+
+def merge_stops(target: np.ndarray) -> np.ndarray:
+    """Each pause joins the exhale before it, or becomes `unknown` where there is none."""
+    out = np.asarray(target, dtype=np.int64).copy()
+    for span in targets_to_spans(out):
+        if span["phase"] == PHASES[STOP]:
+            follows_exhale = span["start"] > 0 and out[span["start"] - 1] == EXHALE
+            out[span["start"]:span["end"]] = EXHALE if follows_exhale else UNKNOWN
+    return out
 
 
 def blank_edges(target: np.ndarray) -> np.ndarray:

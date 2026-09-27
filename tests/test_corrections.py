@@ -162,3 +162,14 @@ def test_the_edge_blank_reads_the_merged_spans():
     out, _ = corrections.apply(target)
     assert out.tolist() == [UNKNOWN] * 2 + [INHALE] * 3 + [UNKNOWN] * 6
 
+
+def test_a_pause_joins_the_exhale_before_it_and_nothing_else():
+    """SL0063 window 278: a pause after `unknown` became a two-sample exhale out of nothing."""
+    corrections = Corrections.from_config({"merge_stop_into_exhale": True})
+    after_unknown = np.array([UNKNOWN] * 3 + [STOP] * 2 + [INHALE] * 3 + [EXHALE] * 3 + [STOP] * 2)
+    out, _ = corrections.apply(after_unknown)
+    assert out.tolist() == [UNKNOWN] * 5 + [INHALE] * 3 + [EXHALE] * 5
+    at_start = np.array([STOP] * 2 + [INHALE] * 3)
+    assert corrections.apply(at_start)[0].tolist() == [UNKNOWN] * 2 + [INHALE] * 3
+    after_inhale = np.array([INHALE] * 3 + [STOP] * 2 + [INHALE] * 3)
+    assert corrections.apply(after_inhale)[0].tolist() == [INHALE] * 3 + [UNKNOWN] * 2 + [INHALE] * 3
