@@ -58,7 +58,8 @@ def loaders(cfg: DictConfig, splits: dict[str, pd.DataFrame],
         # length rather than a remainder - dropping it would discard every window of 300 samples
         # and longer, which is the part variable-length training exists to keep.
         sampler = LengthBucketSampler(frame["samples"].to_numpy(), cfg.training.batch_size,
-                                      shuffle=train, drop_last=False, seed=cfg.seed)
+                                      shuffle=train, drop_last=False, seed=cfg.seed,
+                                      with_epoch=train)
         out[name] = DataLoader(dataset, batch_sampler=sampler,
                                num_workers=cfg.training.num_workers, collate_fn=collate,
                                persistent_workers=cfg.training.num_workers > 0)

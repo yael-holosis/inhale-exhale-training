@@ -3,6 +3,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from tests import synthetic
 from phase.dataset import WindowDataset, class_weights, time_warp
@@ -259,3 +260,46 @@ def test_a_one_sample_sliver_does_not_sink_a_window_score():
     assert figures.score(prediction, reference) == pytest.approx(0.995)
     assert figures.macro_f1(prediction, reference) < 0.7
 
+
+AUGMENT_ALL = {"time_warp_prob": 1.0, "time_warp_range": [0.8, 1.25], "amplitude_prob": 1.0,
+               "amplitude_range": [0.5, 2.0], "drift_prob": 1.0, "drift_scale": 0.3,
+               "noise_prob": 1.0, "noise_scale": 0.05}
+
+
+def test_training_augmentation_is_seeded_by_seed_epoch_and_index(built):
+    """Two identical runs must augment identically, or they train different models."""
+    manifest, root = built
+    one = WindowDataset(manifest, root, train=True, augment=AUGMENT_ALL, seed=7)
+    two = WindowDataset(manifest, root, train=True, augment=AUGMENT_ALL, seed=7)
+    assert torch.equal(one[(0, 3)]["x"], two[(0, 3)]["x"])
+    assert not torch.equal(one[(0, 3)]["x"], one[(0, 4)]["x"])
+    other = WindowDataset(manifest, root, train=True, augment=AUGMENT_ALL, seed=8)
+    assert not torch.equal(one[(0, 3)]["x"], other[(0, 3)]["x"])
+
+
+def test_the_training_sampler_carries_the_epoch_with_each_index():
+    from phase.dataset import LengthBucketSampler
+
+    sampler = LengthBucketSampler(np.full(10, 200), 4, seed=0, with_epoch=True)
+    first, second = list(sampler), list(sampler)
+    assert {epoch for batch in first for _, epoch in batch} == {0}
+    assert {epoch for batch in second for _, epoch in batch} == {1}
+    assert sorted(i for batch in first for i, _ in batch) == list(range(10))
+
+
+def test_two_identical_loaders_yield_identical_batches(built):
+    from torch.utils.data import DataLoader
+
+    from phase.dataset import LengthBucketSampler, collate
+
+    manifest, root = built
+
+    def epochs():
+        dataset = WindowDataset(manifest, root, train=True, augment=AUGMENT_ALL, seed=3)
+        sampler = LengthBucketSampler(manifest["samples"].to_numpy(), 8, seed=3,
+                                      with_epoch=True)
+        loader = DataLoader(dataset, batch_sampler=sampler, collate_fn=collate, num_workers=0)
+        return [batch["x"] for _ in range(2) for batch in loader]
+
+    for a, b in zip(epochs(), epochs()):
+        assert torch.equal(a, b)

@@ -86,9 +86,14 @@ class WindowDataset(Dataset):
         return (shard["values"][start:end].astype(np.float32),
                 shard["targets"][start:end].astype(np.int64))
 
-    def __getitem__(self, index: int) -> dict[str, torch.Tensor]:
+    def __getitem__(self, key: int | tuple[int, int]) -> dict[str, torch.Tensor]:
+        # `(index, epoch)` from a sampler built with `with_epoch`: persistent workers never see
+        # the main process's epoch, so it travels with the index.
+        index, epoch = key if isinstance(key, tuple) else (key, 0)
         values, target = self._window(index)
-        rng = np.random.default_rng(None if self.train else self.seed + index)
+        # Seeded when training too, or two identical runs augment differently and disagree.
+        rng = np.random.default_rng((self.seed, epoch, index) if self.train
+                                    else self.seed + index)
 
         if self.train:
             values, target = self._augment(values, target, rng)
@@ -223,13 +228,14 @@ class LengthBucketSampler(Sampler):
     """
 
     def __init__(self, lengths, batch_size: int, shuffle: bool = True, drop_last: bool = False,
-                 seed: int = 0):
+                 seed: int = 0, with_epoch: bool = False):
         # See the note above: bucketed, a short batch is a whole rare length, not a remainder.
         self.lengths = np.asarray(lengths)
         self.batch_size = int(batch_size)
         self.shuffle = bool(shuffle)
         self.drop_last = bool(drop_last)
         self.seed = int(seed)
+        self.with_epoch = bool(with_epoch)
         self.epoch = 0
 
     def _batches(self) -> list[list[int]]:
@@ -248,7 +254,8 @@ class LengthBucketSampler(Sampler):
         return batches
 
     def __iter__(self):
-        yield from self._batches()
+        for batch in self._batches():
+            yield [(index, self.epoch) for index in batch] if self.with_epoch else batch
         self.epoch += 1
 
     def __len__(self) -> int:
