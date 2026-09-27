@@ -237,3 +237,14 @@ def test_shards_are_read_from_the_subdirectory_and_from_the_old_flat_layout(tmp_
     assert shard_path(tmp_path, "flat.npz") == tmp_path / "flat.npz"
     # Absent either way, the subdirectory is not silently preferred into a missing file.
     assert shard_path(tmp_path, "gone.npz") == tmp_path / "gone.npz"
+
+
+def test_an_absent_class_leaves_the_balance_of_the_others_alone():
+    """`stop` merged away: its zero count must not reweight the three classes still in play."""
+    three = pd.DataFrame({"n_unknown": [300], "n_inhale": [200], "n_exhale": [500]})
+    merged = three.assign(n_stop=[0])
+    weights = class_weights(merged, PHASES, power=0.5, cap=10.0)
+    alone = class_weights(three, ("unknown", "inhale", "exhale"), power=0.5, cap=10.0)
+    assert weights[:3].tolist() == pytest.approx(alone.tolist())
+    assert weights[3] == 1.0
+

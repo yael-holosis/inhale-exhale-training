@@ -27,6 +27,24 @@ PHASES = ("unknown", "inhale", "exhale", "stop")
 PHASE_IDS = {name: index for index, name in enumerate(PHASES)}
 N_CLASSES = len(PHASES)
 
+MERGED_PHASES = PHASES[:STOP]
+"""The classes once stop is merged into exhale. A prefix of `PHASES`, so every index keeps its
+meaning and a target from either vocabulary reads the same."""
+
+VOCABULARIES = {len(classes): classes for classes in (PHASES, MERGED_PHASES)}
+
+
+def classes_for(stop_as_exhale: bool) -> tuple[str, ...]:
+    """The classes a model trains on, given whether its dataset merges stop into exhale."""
+    return MERGED_PHASES if stop_as_exhale else PHASES
+
+
+def classes_of(n_classes: int) -> tuple[str, ...]:
+    """The classes behind `n_classes` logits - so saved logits carry their own vocabulary."""
+    if n_classes not in VOCABULARIES:
+        raise ValueError(f"no vocabulary has {n_classes} classes; known: {sorted(VOCABULARIES)}")
+    return VOCABULARIES[n_classes]
+
 SWAP_ON_FLIP = np.array([UNKNOWN, EXHALE, INHALE, STOP], dtype=np.int64)
 """Turning a trace over exchanges inhale and exhale. Stop sits at a trough either way - it is
 defined as the stretch between an exhale ending and the next inhale starting, which is the

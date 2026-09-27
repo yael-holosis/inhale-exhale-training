@@ -43,6 +43,12 @@ RATIO = "exhale/inhale"
 is the one quantity a pair of compensating duration errors cannot hide in."""
 
 COLUMNS = (*MEASURED, RATIO)
+
+
+def columns_for(classes: tuple[str, ...] = PHASES) -> tuple[str, ...]:
+    """The quantities a duration report carries for this class set - no column for a merged class."""
+    return (*(name for name in MEASURED if name in classes), RATIO)
+
 UNIT = {**{name: "s" for name in MEASURED}, RATIO: ""}
 """A ratio is dimensionless; formatting it with a `s` suffix would be a lie."""
 
@@ -77,7 +83,8 @@ def _seconds(span: dict, fps: float) -> float:
     return (span["end"] - span["start"]) / fps
 
 
-def span_errors(items, iou_threshold: float) -> tuple[pd.DataFrame, pd.DataFrame]:
+def span_errors(items, iou_threshold: float,
+                classes: tuple[str, ...] = PHASES) -> tuple[pd.DataFrame, pd.DataFrame]:
     """`(pairs, coverage)` - one pair row per matched span, one coverage row per window/phase.
 
     Matching is the same greedy best-IoU rule the event metrics use, so a pair here is a pair
@@ -89,7 +96,7 @@ def span_errors(items, iou_threshold: float) -> tuple[pd.DataFrame, pd.DataFrame
     for item in items:
         fps = float(item["fps"])
         partner = {}
-        for name in MEASURED:
+        for name in (n for n in MEASURED if n in classes):
             labelled = interior_spans(item[LABEL], name)
             called = interior_spans(item[MODEL], name)
             matched = match_spans(labelled, called, iou_threshold)
@@ -231,10 +238,11 @@ def _stats(error: np.ndarray, reference: np.ndarray) -> dict[str, float]:
             f"{LABEL}_mean_sec": float(np.mean(reference))}
 
 
-def agreement(frame: pd.DataFrame, reference: str, error: str = ERROR) -> pd.DataFrame:
+def agreement(frame: pd.DataFrame, reference: str, error: str = ERROR,
+              columns: tuple[str, ...] = COLUMNS) -> pd.DataFrame:
     """One stat row per phase, over the rows where both sides called it. Indexed by phase."""
     rows = {}
-    for name in COLUMNS:
+    for name in columns:
         picked = (frame[frame["phase"] == name].dropna(subset=[error, reference])
                   if len(frame) else frame)
         if not len(picked):
@@ -244,13 +252,14 @@ def agreement(frame: pd.DataFrame, reference: str, error: str = ERROR) -> pd.Dat
     return pd.DataFrame(rows).T.rename_axis("phase")
 
 
-def span_agreement(pairs: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
+def span_agreement(pairs: pd.DataFrame, coverage: pd.DataFrame,
+                   columns: tuple[str, ...] = COLUMNS) -> pd.DataFrame:
     """`agreement` over the matched pairs, with what was left unmatched beside it.
 
     The coverage columns are not decoration: a phase can hold a tiny duration error over the
     breaths it matched and miss half of them, and the error column alone reads as success.
     """
-    stats = agreement(pairs, f"{LABEL}_sec")
+    stats = agreement(pairs, f"{LABEL}_sec", columns=columns)
     if not len(coverage):
         return stats
     totals = coverage.groupby("phase")[[LABEL, MODEL, "matched"]].sum()
@@ -263,12 +272,12 @@ def span_agreement(pairs: pd.DataFrame, coverage: pd.DataFrame) -> pd.DataFrame:
     return stats
 
 
-def signal_agreement(medians: pd.DataFrame) -> pd.DataFrame:
+def signal_agreement(medians: pd.DataFrame, columns: tuple[str, ...] = COLUMNS) -> pd.DataFrame:
     """`agreement` over the usable signals, with how many were too thin to carry a median."""
     if not len(medians):
-        return agreement(medians, f"{MEDIAN}_{LABEL}")
+        return agreement(medians, f"{MEDIAN}_{LABEL}", columns=columns)
     usable = medians[medians[USABLE]]
-    stats = agreement(usable, f"{MEDIAN}_{LABEL}")
+    stats = agreement(usable, f"{MEDIAN}_{LABEL}", columns=columns)
     counted = medians.groupby("phase").size().reindex(stats.index)
     stats["signals_seen"] = counted
     stats["signals_thin"] = counted - stats["n"]

@@ -30,7 +30,7 @@ from matplotlib.ticker import MaxNLocator
 import numpy as np
 
 from phase.durations import COLUMNS, LABEL, MEDIAN, MODEL, RATIO, USABLE
-from phase.labels import PHASES, UNKNOWN, targets_to_spans
+from phase.labels import PHASES, UNKNOWN, classes_of, targets_to_spans
 from phase.metrics import per_sample
 from phase.splits import FOLD_COLUMN, SPLIT_COLUMN, TEST, TRAIN, VAL
 
@@ -131,14 +131,16 @@ def panel(ax, values: np.ndarray, reference: np.ndarray, prediction: np.ndarray,
             fontsize=7.5, color=INK_SOFT)
 
 
-def legend_handles(colors: Mapping[str, str]) -> list[Patch]:
-    return [Patch(facecolor=colors[name], edgecolor="none", label=name) for name in PHASES]
+def legend_handles(colors: Mapping[str, str],
+                   classes: tuple[str, ...] = PHASES) -> list[Patch]:
+    return [Patch(facecolor=colors[name], edgecolor="none", label=name) for name in classes]
 
 
 def plot_windows(items: Sequence[dict[str, Any]], out_path: str | Path, heading: str = "",
                  reference_name: str = "algorithm",
                  plot_cfg: Mapping[str, Any] | None = None,
-                 prediction_name: str = "model", caption: str | None = None) -> Path:
+                 prediction_name: str = "model", caption: str | None = None,
+                 classes: tuple[str, ...] = PHASES) -> Path:
     """A page of panels. Each item is `{values, reference, prediction, fps, title}`."""
     if not items:
         raise ValueError("nothing to plot")
@@ -164,7 +166,8 @@ def plot_windows(items: Sequence[dict[str, Any]], out_path: str | Path, heading:
     fig.text(0.988, 0.997,
              caption or f"shading = {prediction_name} · ribbon = {reference_name}",
              ha="right", va="top", fontsize=8, color=INK_SOFT)
-    fig.legend(handles=legend_handles(colors), loc="lower center", ncol=4, frameon=False,
+    fig.legend(handles=legend_handles(colors, classes), loc="lower center", ncol=len(classes),
+               frameon=False,
                fontsize=8, labelcolor=INK_SOFT, bbox_to_anchor=(0.5, -0.004))
     fig.tight_layout(rect=(0.055, 0.032, 1, 0.978), h_pad=3.0)
     fig.savefig(out_path, dpi=160, facecolor=SURFACE, bbox_inches="tight")
@@ -353,11 +356,12 @@ def fold_report(per_fold, ensemble: Mapping[str, float], interval: tuple[float, 
     dots.spines["bottom"].set_color(GRID)
 
     # ------------------------------------------------------------------ per class
-    y = np.arange(len(PHASES))
-    per_class.barh(y, [ensemble.get(f"f1_{name}", np.nan) for name in PHASES],
-                   height=0.62, linewidth=0, color=[colors[name] for name in PHASES])
+    classes = classes_of(matrix.shape[0])
+    y = np.arange(len(classes))
+    per_class.barh(y, [ensemble.get(f"f1_{name}", np.nan) for name in classes],
+                   height=0.62, linewidth=0, color=[colors[name] for name in classes])
     per_class.set_yticks(y)
-    per_class.set_yticklabels(PHASES, fontsize=7.5)
+    per_class.set_yticklabels(classes, fontsize=7.5)
     per_class.invert_yaxis()
     per_class.set_xlim(0, 1)
     per_class.set_xlabel("per-sample F1", fontsize=8, color=INK_SOFT)
@@ -371,13 +375,13 @@ def fold_report(per_fold, ensemble: Mapping[str, float], interval: tuple[float, 
 
     # ------------------------------------------------------------------ confusion
     heat.imshow(matrix, cmap="Blues", vmin=0, vmax=1)
-    heat.set_xticks(range(len(PHASES)), PHASES, fontsize=7, rotation=35, ha="right")
-    heat.set_yticks(range(len(PHASES)), PHASES, fontsize=7)
+    heat.set_xticks(range(len(classes)), classes, fontsize=7, rotation=35, ha="right")
+    heat.set_yticks(range(len(classes)), classes, fontsize=7)
     heat.set_xlabel("predicted", fontsize=8, color=INK_SOFT)
     heat.set_ylabel("labelled", fontsize=8, color=INK_SOFT)
     heat.set_title("row-normalised confusion", fontsize=8.5, color=INK, loc="left", pad=6)
-    for i in range(len(PHASES)):
-        for j in range(len(PHASES)):
+    for i in range(len(classes)):
+        for j in range(len(classes)):
             heat.text(j, i, f"{matrix[i, j]:.2f}", ha="center", va="center", fontsize=7,
                       color=SURFACE if matrix[i, j] > 0.55 else INK)
     heat.tick_params(colors=INK_SOFT, length=0)
@@ -598,7 +602,7 @@ def duration_report(pairs, agreement, out_path: str | Path,
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     colors = colors_of(dict(plot_cfg or {}))
-    named = [n for n in PHASES if n != PHASES[UNKNOWN]]
+    named = list(agreement)
 
     fig, axes = plt.subplots(1, len(named), figsize=(4.3 * len(named), 3.9), facecolor=SURFACE,
                              squeeze=False)
@@ -715,9 +719,11 @@ def _duration_grid(frame, stats, out_path: str | Path, heading: str, subtitle: s
     out_path.parent.mkdir(parents=True, exist_ok=True)
     colors = colors_of(dict(plot_cfg or {}))
 
-    fig, axes = plt.subplots(2, len(COLUMNS), figsize=(4.15 * len(COLUMNS), 7.0),
+    # The columns the stats carry, so a merged class has no empty panel.
+    columns = [name for name in COLUMNS if name in stats.index]
+    fig, axes = plt.subplots(2, len(columns), figsize=(4.15 * len(columns), 7.0),
                              facecolor=SURFACE, squeeze=False)
-    for column, name in enumerate(COLUMNS):
+    for column, name in enumerate(columns):
         # The ratio is dimensionless and is not a phase, so it takes neither the phase palette
         # nor the seconds axis.
         is_ratio = name == RATIO
@@ -786,7 +792,7 @@ def span_duration_report(pairs, stats, out_path: str | Path,
         "ROW 1: Bland-Altman - x is the mean of the two readings, y their difference; the solid "
         "line is the bias and the dashed pair the 95% limits of agreement, bias \u00b1 1.96 SD.  "
         "ROW 2: model against labeller, with the line of equality.\nOne point per labelled span, matched to the prediction of the same phase by "
-        "IoU; spans the window boundary cut are excluded from both sides. The fourth column is one "
+        "IoU; spans the window boundary cut are excluded from both sides. The last column is one "
         "breath's exhale over its own inhale, where both spans of that breath matched. Percentages "
         "are per reading against the labelled value itself - signed beside the bias, absolute "
         "beside the MAE.",
@@ -803,7 +809,7 @@ def signal_duration_report(medians, stats, out_path: str | Path,
         "line is the bias and the dashed pair the 95% limits of agreement, bias \u00b1 1.96 SD.  "
         "ROW 2: model against labeller, with the line of equality.\nOne point per radar signal: the median span length each side called over "
         "that signal's windows, unmatched. Boundary-cut spans excluded; a signal needs enough spans "
-        "on both sides to carry a median. The fourth column is the ratio of that signal's two "
+        "on both sides to carry a median. The last column is the ratio of that signal's two "
         "medians, usable only where both phases were. Percentages are per signal against the "
         "labelled median - signed beside the bias, absolute beside the MAE.",
         f"{MEDIAN}_{LABEL}", f"{MEDIAN}_{MODEL}", "signals", plot_cfg)

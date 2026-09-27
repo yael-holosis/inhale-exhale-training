@@ -28,8 +28,8 @@ EPS_SEC = 1e-9
 """Floor under a labelled duration before dividing by it, for a relative error."""
 
 
-def per_sample(pred: np.ndarray, truth: np.ndarray,
-               mask: np.ndarray | None = None) -> dict[str, float]:
+def per_sample(pred: np.ndarray, truth: np.ndarray, mask: np.ndarray | None = None,
+               classes: tuple[str, ...] = PHASES) -> dict[str, float]:
     """Precision / recall / F1 per class plus macro F1 over **every** class.
 
     `unknown` counts. It is 29% of the samples and it is where the model's mistakes concentrate -
@@ -47,7 +47,7 @@ def per_sample(pred: np.ndarray, truth: np.ndarray,
 
     out: dict[str, float] = {}
     scores = []
-    for index, name in enumerate(PHASES):
+    for index, name in enumerate(classes):
         tp = float(np.sum((pred == index) & (truth == index)))
         fp = float(np.sum((pred == index) & (truth != index)))
         fn = float(np.sum((pred != index) & (truth == index)))
@@ -72,8 +72,8 @@ def _segments(labels: np.ndarray, drop_unknown: bool = True) -> list[dict]:
     return [span for span in spans if not (drop_unknown and span["phase"] == PHASES[UNKNOWN])]
 
 
-def event_level(pred: np.ndarray, truth: np.ndarray,
-                iou_threshold: float = 0.5) -> dict[str, float]:
+def event_level(pred: np.ndarray, truth: np.ndarray, iou_threshold: float = 0.5,
+                classes: tuple[str, ...] = PHASES) -> dict[str, float]:
     """Greedy best-IoU matching within each class, `unknown` included.
 
     Boundary error stays over the called phases: adjacent spans share an edge, so an `unknown`
@@ -83,7 +83,7 @@ def event_level(pred: np.ndarray, truth: np.ndarray,
     starts, ends = [], []
     reference_spans = _segments(truth, drop_unknown=False)
     proposed_spans = _segments(pred, drop_unknown=False)
-    for name in PHASES:
+    for name in classes:
         reference = [s for s in reference_spans if s["phase"] == name]
         proposed = [s for s in proposed_spans if s["phase"] == name]
         matched, start_errors, end_errors = _match(reference, proposed, iou_threshold)
@@ -141,10 +141,11 @@ def _match(reference: list[dict], proposed: list[dict], threshold: float):
             [called["end"] - labelled["end"] for labelled, called, _ in pairs])
 
 
-def phase_durations(labels: np.ndarray, fps: float) -> dict[str, float]:
+def phase_durations(labels: np.ndarray, fps: float,
+                    classes: tuple[str, ...] = PHASES) -> dict[str, float]:
     """Mean seconds per phase and the I:E ratio, for comparing against the device's own numbers."""
     out = {}
-    for name in PHASES:
+    for name in classes:
         if name == PHASES[UNKNOWN]:
             continue
         lengths = [s["end"] - s["start"] for s in _segments(labels) if s["phase"] == name]
@@ -154,19 +155,21 @@ def phase_durations(labels: np.ndarray, fps: float) -> dict[str, float]:
     return out
 
 
-def duration_pairs(prediction: np.ndarray, truth: np.ndarray, fps: float) -> dict[str, tuple]:
+def duration_pairs(prediction: np.ndarray, truth: np.ndarray, fps: float,
+                   classes: tuple[str, ...] = PHASES) -> dict[str, tuple]:
     """`{phase: (predicted_sec, labelled_sec)}` - the mean span length each side calls.
 
     The quantity the device actually reports, so it is the one to measure agreement on. `nan`
     where a side called no span of that phase at all: that is a coverage fact, not a zero, and
     averaging a zero into it would invent agreement where there was no measurement.
     """
-    said, meant = phase_durations(prediction, fps), phase_durations(truth, fps)
+    said, meant = phase_durations(prediction, fps, classes), phase_durations(truth, fps, classes)
     return {name: (said[f"mean_{name}_sec"], meant[f"mean_{name}_sec"])
-            for name in PHASES if name != PHASES[UNKNOWN]}
+            for name in classes if name != PHASES[UNKNOWN]}
 
 
-def duration_agreement(pairs: list[dict[str, tuple]]) -> dict[str, dict[str, float]]:
+def duration_agreement(pairs: list[dict[str, tuple]],
+                       classes: tuple[str, ...] = PHASES) -> dict[str, dict[str, float]]:
     """Bias, limits of agreement and MAE per phase, over the windows where both sides called it.
 
     Bland-Altman: bias is the mean signed error and says whether the model systematically over-
@@ -174,7 +177,7 @@ def duration_agreement(pairs: list[dict[str, tuple]]) -> dict[str, dict[str, flo
     be. They answer different questions and a mean absolute error hides the first.
     """
     out: dict[str, dict[str, float]] = {}
-    for name in (n for n in PHASES if n != PHASES[UNKNOWN]):
+    for name in (n for n in classes if n != PHASES[UNKNOWN]):
         both = [(said, meant) for window in pairs
                 for said, meant in [window[name]]
                 if not (np.isnan(said) or np.isnan(meant))]

@@ -20,23 +20,33 @@ from __future__ import annotations
 
 import numpy as np
 
-from phase.labels import N_CLASSES, PHASE_IDS
+from phase.labels import PHASES, classes_of
 
 
-def transition_matrix(allowed: dict[str, list[str]], switch_penalty: float) -> np.ndarray:
-    """Log-cost matrix from `{phase: [phases it may become]}`. Self-transitions are always free."""
-    cost = np.full((N_CLASSES, N_CLASSES), -np.inf, dtype=np.float64)
-    for name, index in PHASE_IDS.items():
+def transition_matrix(allowed: dict[str, list[str]], switch_penalty: float,
+                      classes: tuple[str, ...] = PHASES) -> np.ndarray:
+    """Log-cost matrix from `{phase: [phases it may become]}`. Self-transitions are free.
+
+    A class that is not a key is not in the label set: it can neither be entered nor held.
+    """
+    ids = {name: index for index, name in enumerate(classes)}
+    cost = np.full((len(classes), len(classes)), -np.inf, dtype=np.float64)
+    for name, index in ids.items():
+        if name not in allowed:
+            continue
         cost[index, index] = 0.0
         for target in allowed.get(name, []):
-            cost[index, PHASE_IDS[target]] = -abs(switch_penalty)
+            if target not in ids:
+                raise KeyError(f"transition {name} -> {target}: {target!r} is not in {classes}")
+            cost[index, ids[target]] = -abs(switch_penalty)
     return cost
 
 
 def viterbi(log_probs: np.ndarray, cost: np.ndarray) -> np.ndarray:
     """Best path through (length, n_classes) log-probabilities under `cost`."""
     length, classes = log_probs.shape
-    score = log_probs[0].copy()
+    # A class that cannot be held is outside the label set, so a path may not start in it either.
+    score = np.where(np.isfinite(np.diag(cost)), log_probs[0], -np.inf)
     back = np.zeros((length, classes), dtype=np.int64)
     for step in range(1, length):
         candidates = score[:, None] + cost                 # (from, to)
@@ -49,13 +59,14 @@ def viterbi(log_probs: np.ndarray, cost: np.ndarray) -> np.ndarray:
     return path
 
 
-def enforce_min_duration(path: np.ndarray, minimum: dict[str, int]) -> np.ndarray:
+def enforce_min_duration(path: np.ndarray, minimum: dict[str, int],
+                         classes: tuple[str, ...] = PHASES) -> np.ndarray:
     """Absorb runs shorter than their class's floor into the longer neighbour.
 
     Repeated until nothing moves: absorbing one short run can leave its neighbour short too.
     """
     path = np.asarray(path, dtype=np.int64).copy()
-    floors = np.array([minimum.get(name, 1) for name in PHASE_IDS], dtype=np.int64)
+    floors = np.array([minimum.get(name, 1) for name in classes], dtype=np.int64)
     for _ in range(len(floors) * 4):
         edges = np.flatnonzero(np.diff(path)) + 1
         starts = np.concatenate(([0], edges))
@@ -78,7 +89,11 @@ def decode(logits: np.ndarray, cost: np.ndarray | None = None,
            minimum: dict[str, int] | None = None) -> np.ndarray:
     """(length, n_classes) logits -> per-sample classes. Both passes are optional."""
     logits = np.asarray(logits, dtype=np.float64)
+    if cost is not None and cost.shape[0] != logits.shape[1]:
+        raise ValueError(f"{logits.shape[1]} logits against a {cost.shape[0]}-class transition "
+                         "table")
     shifted = logits - logits.max(axis=1, keepdims=True)
     log_probs = shifted - np.log(np.exp(shifted).sum(axis=1, keepdims=True))
     path = viterbi(log_probs, cost) if cost is not None else np.argmax(log_probs, axis=1)
-    return enforce_min_duration(path, minimum) if minimum else path
+    return (enforce_min_duration(path, minimum, classes_of(logits.shape[1])) if minimum
+            else path)

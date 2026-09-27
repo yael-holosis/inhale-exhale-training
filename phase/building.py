@@ -35,6 +35,7 @@ import pandas as pd
 import yaml
 
 from phase import sources
+from phase.corrections import Corrections
 from phase.labelsources import LabelSource
 from phase.splits import STUDY_COLUMN, study_of
 from phase.labels import PHASES, class_counts, spans_to_targets
@@ -120,6 +121,12 @@ def existing_params(directory: Path) -> dict[str, Any]:
         return {}
     with open(path) as handle:
         return yaml.safe_load(handle) or {}
+
+
+def stop_as_exhale(directory: Path) -> bool:
+    """Whether the dataset's targets have `stop` merged into `exhale`, off its own build params."""
+    labels = existing_params(directory).get("labels", {})
+    return Corrections.from_config(labels.get("corrections")).merge_stop_into_exhale
 
 
 # --------------------------------------------------------------------------------- selection

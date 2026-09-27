@@ -164,12 +164,13 @@ labelling rule already writes the second one down as `unknown`.
 ### Taking the labelling at less than its word
 
 `data.labels.corrections` rewrites the target before it reaches a shard, so it is what the network
-is trained on, what it is scored against, and what every figure draws. Both are off by default.
+is trained on, what it is scored against, and what every figure draws. All are off by default.
 
 | | What it does | Why |
 | --- | --- | --- |
 | `blank_edge_spans` | a labelled span that runs to the window boundary becomes `unknown`, whole | the boundary cut that breath, and whether a labeller marks the fragment it leaves is inconsistent |
 | `all_unknown_above` | a window more than that fraction `unknown` becomes entirely `unknown` | a window that is mostly uncallable should not claim the phases it does have |
+| `merge_stop_into_exhale` | every `stop` sample becomes `exhale`, before the other two | tests whether the pause is worth a class of its own, or is better scored as the tail of the breath out |
 
 The fraction is measured **after** the edge spans are blanked - blanking them adds `unknown`, so
 it can be what pushes a window over.
@@ -189,6 +190,14 @@ What each setting costs on the 1,081-window human set:
 | on | 0.5 | 33.9% | 202 |
 
 Blanking takes 8.4% of the labelled samples.
+
+`merge_stop_into_exhale` makes it a three-class problem (unknown 25.9%, inhale 27.4%, exhale 46.7%
+on the human set). The run reads the setting off the dataset's own build params: the network has
+three outputs, the decoder uses the `decoding.allowed.stop_as_exhale` table, and every metric,
+figure and duration report carries three classes. Anything reading saved logits takes the class
+set from their width, so a four-class run still reports as four. The merged classes are the first
+three of the four, so every index keeps its meaning. Its scores are not comparable with a
+four-class run: macro F1 averages three classes instead of four.
 
 **A score measured under one setting cannot be compared with one measured under another.** Both
 corrections move samples into `unknown`, which is the easy class, so the headline rises without
@@ -703,7 +712,7 @@ follow it.
   `run_inference.py` (the device entrypoint), `pack.py` (fills the folder, `--probe` inspects a
   device), `report.py` (the figures, on the host). `pack.py` writes the payload into the folder
   itself, so there is no build directory duplicating the code.
-- `tests/` - 169 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
+- `tests/` - 200 tests, no AWS and no built dataset; `tests/synthetic.py` also builds a fake set
   for a smoke run:
 
 ```bash

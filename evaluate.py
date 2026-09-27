@@ -80,8 +80,10 @@ def window_samples(root: Path, row: pd.Series) -> tuple[np.ndarray, np.ndarray]:
                 stored["targets"][start:end].astype(np.int64))
 
 
-def report(name: str, pred: np.ndarray, truth: np.ndarray) -> dict[str, float]:
-    scores = {**per_sample(pred, truth), **event_level(pred, truth)}
+def report(name: str, pred: np.ndarray, truth: np.ndarray,
+           classes: tuple[str, ...] = PHASES) -> dict[str, float]:
+    scores = {**per_sample(pred, truth, classes=classes),
+              **event_level(pred, truth, classes=classes)}
     line = "  ".join(f"{key.replace('boundary_mae_samples', 'bnd')}={scores[key]:.2f}"
                      for key in REPORT_KEYS if key in scores)
     print(f"  {name:22s} {line}")
@@ -132,10 +134,10 @@ def on_fold(args, cfg) -> int:
 
     fps = float(test["analysis_fps"].median())
     print("\nagainst production's own labels - this measures imitation, not correctness:")
-    report("model vs teacher", np.concatenate(preds), np.concatenate(truths))
+    report("model vs teacher", np.concatenate(preds), np.concatenate(truths), model.classes)
     print("\nmean phase durations:")
     for name, labels in (("model", np.concatenate(preds)), ("teacher", np.concatenate(truths))):
-        durations = phase_durations(labels, fps)
+        durations = phase_durations(labels, fps, model.classes)
         print(f"  {name:8s} " + "  ".join(f"{key}={value:.2f}"
                                           for key, value in durations.items()))
 
@@ -152,7 +154,8 @@ def on_fold(args, cfg) -> int:
               f"{100 * (scores[labelled] < 0.5).mean():.0f}% below 0.50")
         report("  pooled over those", np.concatenate([i["prediction"] for i, keep
                                                       in zip(items, labelled) if keep]),
-               np.concatenate([i["reference"] for i, keep in zip(items, labelled) if keep]))
+               np.concatenate([i["reference"] for i, keep in zip(items, labelled) if keep]),
+               model.classes)
     if (~labelled).any():
         called = np.array([(item["prediction"] != UNKNOWN).mean()
                            for item, keep in zip(items, labelled) if not keep])
@@ -234,9 +237,9 @@ def on_human(args, cfg) -> int:
           f"{len({row['patient'] for row in rows})} patients\n")
     stacked = {key: np.concatenate([row[key] for row in rows])
                for key in ("model", "human", "teacher")}
-    report("model vs human", stacked["model"], stacked["human"])
-    report("teacher vs human", stacked["teacher"], stacked["human"])
-    report("model vs teacher", stacked["model"], stacked["teacher"])
+    report("model vs human", stacked["model"], stacked["human"], model.classes)
+    report("teacher vs human", stacked["teacher"], stacked["human"], model.classes)
+    report("model vs teacher", stacked["model"], stacked["teacher"], model.classes)
     return 0
 
 

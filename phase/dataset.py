@@ -261,9 +261,12 @@ def class_weights(manifest: pd.DataFrame, phases, power: float = 1.0,
 
     Capped, because on a set where one class is nearly absent an uncapped inverse turns a handful
     of samples into the whole loss. `power` between 0 and 1 softens it - 0.5 is the usual choice
-    when the raw inverse over-corrects.
+    when the raw inverse over-corrects. A class absent from the split - `stop` once it is merged
+    into exhale - is left out of the balance and weighted 1; it never appears as a target.
     """
     counts = np.array([float(manifest[f"n_{name}"].sum()) for name in phases])
-    counts = np.maximum(counts, 1.0)
-    weights = (counts.sum() / (len(counts) * counts)) ** power
+    present = counts > 0
+    weights = np.ones(len(counts))
+    if present.any():
+        weights[present] = (counts[present].sum() / (present.sum() * counts[present])) ** power
     return np.clip(weights, 1.0 / cap, cap).astype(np.float32)

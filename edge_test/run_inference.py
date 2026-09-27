@@ -44,7 +44,7 @@ import numpy as np
 import torch
 
 from phase.decode import decode, transition_matrix
-from phase.labels import N_CLASSES, PHASES
+from phase.labels import PHASES, classes_of
 from phase.metrics import event_level, per_sample
 from phase.preprocess import normalise_window
 from models.unet1d import UNet1D
@@ -154,10 +154,15 @@ def out_dir(folder: Path) -> Path:
     return path
 
 
+def packed_classes(manifest: dict) -> tuple[str, ...]:
+    """The class set the packed model was trained on. A bundle predating the key is 4-class."""
+    return tuple(manifest.get("classes", PHASES))
+
+
 def load_model(folder: Path, manifest: dict) -> UNet1D:
     """The net alone, from a state dict. `weights_only=True`, so nothing in the file is executed."""
     stored = torch.load(folder / WEIGHTS, map_location="cpu", weights_only=True)
-    net = UNet1D(n_classes=N_CLASSES, **manifest["model"])
+    net = UNet1D(n_classes=len(packed_classes(manifest)), **manifest["model"])
     net.load_state_dict(stored["state_dict"])
     net.eval()
     return net
@@ -166,7 +171,8 @@ def load_model(folder: Path, manifest: dict) -> UNet1D:
 def decoder(manifest: dict) -> tuple[np.ndarray | None, dict | None]:
     """The two decoding passes as the training run had them, rebuilt from the recorded table."""
     decoding = manifest["decoding"]
-    cost = (transition_matrix(decoding["allowed"], decoding["switch_penalty"])
+    cost = (transition_matrix(decoding["allowed"], decoding["switch_penalty"],
+                              packed_classes(manifest))
             if decoding["viterbi"] else None)
     return cost, (decoding["min_duration"] if decoding["enforce_min"] else None)
 
@@ -217,8 +223,9 @@ def warm_up(net, items: list[dict], normalise: str, cost, minimum, passes: int) 
 
 def correctness(item: dict, logits: np.ndarray, prediction: np.ndarray) -> dict:
     """This window against its labels, and against what the host got on it."""
-    scores = {**per_sample(prediction, item["targets"]),
-              **event_level(prediction, item["targets"])}
+    classes = classes_of(logits.shape[1])
+    scores = {**per_sample(prediction, item["targets"], classes=classes),
+              **event_level(prediction, item["targets"], classes=classes)}
     return {"window_id": item["window_id"], "patient": item["patient"], "env": item["env"],
             "fps": item["fps"], "samples": int(item["values"].size),
             "macro_f1": float(scores["macro_f1"]),
@@ -231,7 +238,7 @@ def correctness(item: dict, logits: np.ndarray, prediction: np.ndarray) -> dict:
             "labels_match_host": bool(np.array_equal(prediction, item["host_prediction"])),
             "agreement_with_host": float(np.mean(prediction == item["host_prediction"])),
             "classes": {name: int((prediction == index).sum())
-                        for index, name in enumerate(PHASES)}}
+                        for index, name in enumerate(classes)}}
 
 
 def spread(values) -> dict[str, float]:

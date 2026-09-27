@@ -75,3 +75,28 @@ def test_an_unnamed_source_fails_rather_than_picking_a_table():
 
     with pytest.raises(KeyError):
         allowed_for({"allowed": {"human": {}, "algorithm": {}}}, "something-else")
+
+
+def test_a_class_outside_the_table_is_never_decoded():
+    """With stop merged into exhale there is no stop row: not entered, not held, not started in."""
+    merged = {"unknown": ["inhale", "exhale"], "inhale": ["exhale", "unknown"],
+              "exhale": ["inhale", "unknown"]}
+    cost = transition_matrix(merged, 2.0)
+    assert np.all(cost[:, STOP] == -np.inf)
+    path = decode(_logits([STOP] * 3 + [INHALE] * 4 + [STOP] * 4 + [EXHALE] * 3), cost)
+    assert STOP not in path.tolist()
+
+
+def test_the_stop_as_exhale_tables_have_no_stop():
+    from omegaconf import OmegaConf
+
+    from models.lightning_module import allowed_for
+
+    decoding = OmegaConf.to_container(
+        OmegaConf.load("parameter/training/default.yaml").decoding, resolve=True)
+    for source in ("human", "algorithm"):
+        table = allowed_for(decoding, source, stop_as_exhale=True)
+        assert "stop" not in table
+        assert not any("stop" in targets for targets in table.values())
+        assert "inhale" in table["exhale"]
+

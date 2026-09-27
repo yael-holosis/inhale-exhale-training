@@ -144,3 +144,21 @@ def test_recorrect_falls_back_to_targets_where_nothing_was_corrected(tmp_path):
                          Corrections.from_config({"blank_edge_spans": True}),
                          previous=Corrections.from_config({}), log=lambda *_: None)
     assert frame["n_unknown"].sum() > drawn["n_unknown"].sum()
+
+
+def test_merging_stop_turns_every_pause_into_exhale():
+    corrections = Corrections.from_config({"merge_stop_into_exhale": True})
+    target = np.array([UNKNOWN] * 2 + [INHALE] * 3 + [EXHALE] * 3 + [STOP] * 3 + [UNKNOWN] * 2)
+    out, forced = corrections.apply(target)
+    assert corrections.enabled and not forced
+    assert out.tolist() == [UNKNOWN] * 2 + [INHALE] * 3 + [EXHALE] * 6 + [UNKNOWN] * 2
+
+
+def test_the_edge_blank_reads_the_merged_spans():
+    """A trailing exhale + stop is one exhale once merged, so it goes whole."""
+    corrections = Corrections.from_config({"merge_stop_into_exhale": True,
+                                           "blank_edge_spans": True})
+    target = np.array([UNKNOWN] * 2 + [INHALE] * 3 + [EXHALE] * 3 + [STOP] * 3)
+    out, _ = corrections.apply(target)
+    assert out.tolist() == [UNKNOWN] * 2 + [INHALE] * 3 + [UNKNOWN] * 6
+

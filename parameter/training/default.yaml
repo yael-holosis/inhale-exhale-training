@@ -65,3 +65,17 @@ decoding:
       inhale:  [exhale, unknown]
       exhale:  [stop, inhale, unknown]
       stop:    [inhale, unknown]
+    # For a dataset built with `merge_stop_into_exhale`, picked off its build params. `stop` has
+    # no row, so it can neither be entered nor held. Each is the table above with stop folded
+    # into exhale: exhale -> stop -> inhale becomes exhale -> inhale.
+    stop_as_exhale:
+      algorithm:
+        unknown: [inhale, exhale]
+        inhale:  [unknown]
+        exhale:  [unknown, inhale]
+      # Measured over 10,339 transitions in the merged human set: inhale->exhale 47.5%,
+      # exhale->inhale 45.0%, the four into or out of unknown 7.5% - nothing else occurs.
+      human:
+        unknown: [inhale, exhale]
+        inhale:  [exhale, unknown]
+        exhale:  [inhale, unknown]

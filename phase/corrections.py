@@ -10,6 +10,10 @@ Nothing here reads the trace - a correction is a statement about the labelling o
     Only a span actually touching the edge: where the window already opens or closes with
     `unknown`, the labeller has said what they saw and nothing needs correcting.
 
+`merge_stop_into_exhale` - every `stop` sample becomes `exhale`, so the pause is part of the breath
+    out rather than a phase of its own. Applied first: the other corrections read the merged label
+    set. The decoder then needs the `stop_as_exhale` transition table.
+
 `all_unknown_above` - a window whose corrected target is more than this fraction `unknown` becomes
     entirely `unknown`. The fraction is measured **after** the edge spans are blanked, because
     that is the target the network would otherwise be given.
@@ -22,18 +26,20 @@ from typing import Any
 
 import numpy as np
 
-from phase.labels import UNKNOWN, targets_to_spans, touches_edge
+from phase.labels import EXHALE, STOP, UNKNOWN, targets_to_spans, touches_edge
 
 BLANK_EDGE_SPANS = "blank_edge_spans"
 ALL_UNKNOWN_ABOVE = "all_unknown_above"
+MERGE_STOP_INTO_EXHALE = "merge_stop_into_exhale"
 
 
 @dataclass(frozen=True)
 class Corrections:
-    """What `data.labels.corrections` asks for. Both off by default."""
+    """What `data.labels.corrections` asks for. All off by default."""
 
     blank_edge_spans: bool = False
     all_unknown_above: float | None = None
+    merge_stop_into_exhale: bool = False
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None) -> "Corrections":
@@ -45,21 +51,26 @@ class Corrections:
                 f"labels.corrections.{ALL_UNKNOWN_ABOVE} must be in [0, 1) - 1.0 would blank "
                 "every window")
         return cls(blank_edge_spans=bool(cfg.get(BLANK_EDGE_SPANS, False)),
-                   all_unknown_above=above)
+                   all_unknown_above=above,
+                   merge_stop_into_exhale=bool(cfg.get(MERGE_STOP_INTO_EXHALE, False)))
 
     @property
     def enabled(self) -> bool:
-        return self.blank_edge_spans or self.all_unknown_above is not None
+        return (self.blank_edge_spans or self.all_unknown_above is not None
+                or self.merge_stop_into_exhale)
 
     def describe(self) -> dict[str, Any]:
         return {BLANK_EDGE_SPANS: self.blank_edge_spans,
-                ALL_UNKNOWN_ABOVE: self.all_unknown_above}
+                ALL_UNKNOWN_ABOVE: self.all_unknown_above,
+                MERGE_STOP_INTO_EXHALE: self.merge_stop_into_exhale}
 
     def apply(self, target: np.ndarray) -> tuple[np.ndarray, bool]:
         """`(corrected target, forced entirely unknown)`. The input is never modified."""
         target = np.asarray(target, dtype=np.int64).copy()
         if not target.size:
             return target, False
+        if self.merge_stop_into_exhale:
+            target[target == STOP] = EXHALE
         if self.blank_edge_spans:
             target = blank_edges(target)
         if self.all_unknown_above is not None:

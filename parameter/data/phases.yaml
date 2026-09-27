@@ -45,6 +45,9 @@ labels:
     # A window more than this fraction unknown - measured after the edge spans - becomes entirely
     # unknown. It stays in the set; it just stops claiming phases. Null disables.
     all_unknown_above: null
+    # Every stop sample becomes exhale: the pause is scored as part of the breath out. Applied
+    # before the two above. Selects the `stop_as_exhale` transition tables at decode time.
+    merge_stop_into_exhale: false
 
 # Written into the dataset by make_splits.py, never recomputed at train time.
 split:

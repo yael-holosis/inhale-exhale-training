@@ -41,7 +41,6 @@ from models.lightning_module import allowed_for
 from phase import figures
 from phase.building import load_windows, stamp
 from phase.decode import decode
-from phase.labels import PHASES
 from phase.preprocess import WINDOW, normalise_window
 from omegaconf import OmegaConf
 from phase.splits import split_for
@@ -304,6 +303,8 @@ def main() -> int:
         "fold": fold,
         "split": args.split,
         "label_source": label_source,
+        # The device builds a net this wide and scores against these names.
+        "classes": list(model.classes),
         "normalise": args.normalise,
         "fps": float(model.hparams["fps"]),
         "n_windows": len(chosen),
@@ -321,7 +322,8 @@ def main() -> int:
         # `models.lightning_module`, which needs Lightning to import.
         "decoding": {"viterbi": bool(decoding.get("viterbi")),
                      "switch_penalty": float(decoding["switch_penalty"]),
-                     "allowed": allowed_for(decoding, label_source),
+                     "allowed": allowed_for(decoding, label_source,
+                                            bool(model.hparams.get("stop_as_exhale", False))),
                      "enforce_min": bool(decoding.get("enforce_min")),
                      "min_duration": dict(decoding["min_duration"])},
         "logit_tolerance": runner.LOGIT_TOLERANCE,
@@ -336,7 +338,7 @@ def main() -> int:
         "mean_samples": round(float(np.mean([item["values"].size for item in chosen])), 1),
         "class_balance": {name: int(sum(int((item["reference"] == index).sum())
                                         for item in chosen))
-                          for index, name in enumerate(PHASES)},
+                          for index, name in enumerate(model.classes)},
     }
 
     torch.save({"state_dict": net_state(model), "model": manifest["model"]},

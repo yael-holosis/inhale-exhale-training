@@ -29,10 +29,10 @@ from torch.utils.data import DataLoader
 from clearml_utils import initialize_clearml_task, run_title
 from models.lightning_module import PhaseSegmenter
 from phase import figures
-from phase.building import shard_path, load_windows, resolve
+from phase.building import shard_path, load_windows, resolve, stop_as_exhale
 from phase.decode import decode
 from phase.dataset import LengthBucketSampler, WindowDataset, class_weights, collate
-from phase.labels import PHASES
+from phase.labels import classes_for, classes_of
 from phase.preprocess import normalise_window
 from phase.splits import SPLIT_COLUMN, describe, split_for
 from report_folds import (AGGREGATE_FIGURES, AGGREGATE_TABLES, PASSES, PAGES_DIR,
@@ -123,7 +123,8 @@ def test_figure(cfg: DictConfig, items: list[dict], run_dir: Path,
         panels, run_dir / "test_windows.png",
         f"fold {fold} test set · {cfg.plot.pick} of {len(items)} windows",
         "algorithm" if cfg.data.labels.source == "algorithm" else "labeller",
-        OmegaConf.to_container(cfg.plot, resolve=True))
+        OmegaConf.to_container(cfg.plot, resolve=True),
+        classes=classes_of(items[0]["logits"].shape[1]))
 
 
 def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
@@ -139,16 +140,19 @@ def run_fold(cfg: DictConfig, dataset: Path, manifest: pd.DataFrame, fold: int,
     print(f"dataset {dataset}\nfold {fold} of {cut.folds}, test held out of every fold\n"
           + describe(splits, total=len(manifest), stratify_cols=cut.stratify_cols))
 
-    weights = class_weights(splits["train"], PHASES, power=cfg.training.class_weight_power,
+    merged = stop_as_exhale(dataset)
+    classes = classes_for(merged)
+    weights = class_weights(splits["train"], classes, power=cfg.training.class_weight_power,
                             cap=cfg.training.class_weight_cap)
     print("class weights: " + "  ".join(f"{name}={value:.2f}"
-                                        for name, value in zip(PHASES, weights)))
+                                        for name, value in zip(classes, weights)))
 
     fps = float(splits["train"]["analysis_fps"].median())
     model = PhaseSegmenter(model=OmegaConf.to_container(cfg.model, resolve=True),
                            training=OmegaConf.to_container(cfg.training, resolve=True),
                            class_weights=weights.tolist(), fps=fps, fold=fold,
-                           label_source=str(cfg.data.labels.source))
+                           label_source=str(cfg.data.labels.source),
+                           stop_as_exhale=merged)
     print(f"{cfg.model.name}: {model.net.n_parameters():,} parameters, "
           f"receptive field {model.net.receptive_field()} samples "
           f"({model.net.receptive_field() / fps:.0f} s at {fps:g} fps)")

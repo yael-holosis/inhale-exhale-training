@@ -35,9 +35,9 @@ from omegaconf import OmegaConf
 
 from models.lightning_module import allowed_for
 from phase import durations, figures
-from phase.building import load_windows, shard_path
+from phase.building import load_windows, shard_path, stop_as_exhale
 from phase.decode import decode, transition_matrix
-from phase.labels import N_CLASSES, PHASES, UNKNOWN
+from phase.labels import PHASES, UNKNOWN, classes_of
 from phase.labelsources import ALGORITHM
 from phase.metrics import (duration_agreement, duration_pairs, event_level,
                            per_sample)
@@ -65,14 +65,20 @@ def windows_of(fold: dict) -> list[tuple[np.ndarray, np.ndarray]]:
              fold["targets"][offsets[i]:offsets[i + 1]]) for i in range(len(offsets) - 1)]
 
 
+def classes_in(windows) -> tuple[str, ...]:
+    """The class set the run was trained on, read off the width of its saved logits."""
+    return classes_of(windows[0][0].shape[1])
+
+
 def score_windows(windows, cost, min_duration, fps: float, event_iou: float) -> dict:
     """Per-sample metrics over the pooled samples, event metrics averaged per window."""
+    classes = classes_in(windows)
     decoded = [(decode(logits, cost, min_duration), truth) for logits, truth in windows]
     metrics = per_sample(np.concatenate([p for p, _ in decoded]),
-                         np.concatenate([t for _, t in decoded]))
+                         np.concatenate([t for _, t in decoded]), classes=classes)
     events: dict[str, list[float]] = {}
     for prediction, truth in decoded:
-        for key, value in event_level(prediction, truth, event_iou).items():
+        for key, value in event_level(prediction, truth, event_iou, classes).items():
             events.setdefault(key, []).append(value)
     for key, values in events.items():
         clean = [v for v in values if not np.isnan(v)]
@@ -83,36 +89,34 @@ def score_windows(windows, cost, min_duration, fps: float, event_iou: float) -> 
     return metrics
 
 
-CALLED = tuple(PHASES)
-"""Every class, `unknown` included - it is 29% of the samples and where the mistakes are."""
-
-
-def weighted_dice(metrics: dict, truth: np.ndarray) -> float:
+def weighted_dice(metrics: dict, truth: np.ndarray, classes: tuple[str, ...] = PHASES) -> float:
     """Per-class Dice weighted by that class's support in this patient's own labels.
 
     Dice and F1 are the same quantity per class, so these are the `f1_*` values already computed
-    - weighted by support instead of averaged flat. `unknown` is in the weighting.
+    - weighted by support instead of averaged flat. Every class, `unknown` included - it is 29%
+    of the samples and where the mistakes are.
     """
-    support = {name: float(np.sum(truth == PHASES.index(name))) for name in CALLED}
+    support = {name: float(np.sum(truth == index)) for index, name in enumerate(classes)}
     total = sum(support.values())
     if not total:
         return float("nan")
-    return sum(metrics[f"f1_{name}"] * support[name] for name in CALLED) / total
+    return sum(metrics[f"f1_{name}"] * support[name] for name in classes) / total
 
 
 def per_patient(windows, patients: np.ndarray, cost, min_duration, fps: float,
                 event_iou: float) -> pd.DataFrame:
     """One row per test patient. Which people it fails on is not visible in a pooled score."""
     rows = []
+    classes = classes_in(windows)
     for name in sorted(set(patients.tolist())):
         picked = [windows[i] for i in np.flatnonzero(patients == name)]
         metrics = score_windows(picked, cost, min_duration, fps, event_iou)
         truth = np.concatenate([truth for _, truth in picked])
         rows.append({"patient": name, STUDY_COLUMN: study_of(name),
                      "windows": len(picked), "samples": int(truth.size),
-                     "weighted_dice": weighted_dice(metrics, truth),
+                     "weighted_dice": weighted_dice(metrics, truth, classes),
                      "macro_f1": metrics["macro_f1"],
-                     **{f"f1_{n}": metrics[f"f1_{n}"] for n in CALLED}})
+                     **{f"f1_{n}": metrics[f"f1_{n}"] for n in classes}})
     return pd.DataFrame(rows).sort_values("weighted_dice").reset_index(drop=True)
 
 
@@ -236,13 +240,14 @@ def draw_every_window(runs: Path, out_dir: Path, ensemble: dict, windows, cost, 
             f"test set, ensemble {shading} · page {page + 1} of {total} · "
             f"windows {page * per_page + 1}-{page * per_page + len(chunk)} of {len(items)}",
             "labeller", plot_cfg, prediction_name=shading,
-            caption=f"shading = {shading} · ribbon = labeller"))
+            caption=f"shading = {shading} · ribbon = labeller", classes=classes_in(windows)))
     return written
 
 
 def confusion(windows, cost, min_duration) -> np.ndarray:
     """Row-normalised, so a class that is 29% of the samples cannot dominate every row."""
-    matrix = np.zeros((N_CLASSES, N_CLASSES), dtype=float)
+    n_classes = len(classes_in(windows))
+    matrix = np.zeros((n_classes, n_classes), dtype=float)
     for logits, truth in windows:
         prediction = decode(logits, cost, min_duration)
         for true_class, predicted in zip(truth, prediction):
@@ -352,10 +357,14 @@ def settings_of(runs: Path, folds: list[dict], label_source: str | None,
               f"- this is an ablation, not what the run decoded with")
         decoding["enforce_min"] = bool(enforce_min)
     source = label_source or label_source_of(runs)
-    print(f"labels.source = {source}, switch_penalty = {decoding['switch_penalty']}, "
-          f"enforce_min = {decoding['enforce_min']}, "
-          f"transition table = {sorted(allowed_for(decoding, source))}")
-    cost = (transition_matrix(allowed_for(decoding, source), decoding["switch_penalty"])
+    dataset = dataset_of(runs)
+    merged = dataset is not None and stop_as_exhale(dataset)
+    allowed = allowed_for(decoding, source, merged)
+    print(f"labels.source = {source}, stop_as_exhale = {merged}, "
+          f"switch_penalty = {decoding['switch_penalty']}, "
+          f"enforce_min = {decoding['enforce_min']}, transition table = {allowed}")
+    classes = classes_of(folds[0]["logits"].shape[1])
+    cost = (transition_matrix(allowed, decoding["switch_penalty"], classes)
             if decoding["viterbi"] else None)
     return {"cost": cost,
             "min_duration": decoding["min_duration"] if decoding["enforce_min"] else None,
@@ -488,9 +497,12 @@ def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, m
     if not items:
         print("no test window could be traced to a signal - skipping the duration reports")
         return
+    classes = classes_in(windows)
+    columns = durations.columns_for(classes)
 
-    pairs, coverage = durations.span_errors(items, event_iou)
-    span_stats = durations.span_agreement(pairs, coverage)
+    pairs, coverage = durations.span_errors(items, event_iou, classes)
+    span_stats = durations.span_agreement(pairs, coverage, columns)
+
     pairs.to_csv(out_dir / f"{SPAN_ERRORS}.csv", index=False)
     span_stats.to_csv(out_dir / f"{SPAN_AGREEMENT}.csv")
     figures.span_duration_report(pairs, span_stats, out_dir / f"{SPAN_FIGURE}.png", plot_cfg)
@@ -498,7 +510,7 @@ def duration_reports(runs: Path, out_dir: Path, ensemble: dict, windows, cost, m
     print("\n".join(durations.describe(span_stats, "spans")))
 
     medians = durations.signal_medians(items)
-    signal_stats = durations.signal_agreement(medians)
+    signal_stats = durations.signal_agreement(medians, columns)
     medians.to_csv(out_dir / f"{SIGNAL_MEDIANS}.csv", index=False)
     signal_stats.to_csv(out_dir / f"{SIGNAL_AGREEMENT}.csv")
     figures.signal_duration_report(medians, signal_stats, out_dir / f"{SIGNAL_FIGURE}.png",
@@ -580,9 +592,10 @@ def _report_one(label: str, out_dir: Path, folds, cost, min_duration, fps: float
 
     # The durations are what the device reports, so agreement on them is the result rather than
     # a diagnostic. Per window, over the windows where both sides called the phase at all.
-    pairs = [duration_pairs(decode(logits, cost, min_duration), truth, fps)
+    classes = classes_in(windows)
+    pairs = [duration_pairs(decode(logits, cost, min_duration), truth, fps, classes)
              for logits, truth in windows]
-    agreement = duration_agreement(pairs)
+    agreement = duration_agreement(pairs, classes)
     pd.DataFrame(agreement).T.to_csv(out_dir / "duration_agreement.csv")
     figures.duration_report(pairs, agreement, out_dir / "durations.png", plot_cfg)
     for name, stats in agreement.items():

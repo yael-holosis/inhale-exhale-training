@@ -22,11 +22,15 @@ import torch.nn.functional as F
 from models.unet1d import UNet1D
 from phase.labelsources import ALGORITHM, SOURCES
 from phase.decode import decode, transition_matrix
-from phase.labels import N_CLASSES, PHASES
+from phase.labels import classes_for
 from phase.metrics import event_level, per_sample
 
 
-def allowed_for(decoding: dict, label_source: str) -> dict:
+STOP_AS_EXHALE = "stop_as_exhale"
+"""`decoding.allowed` key holding the per-source tables for a dataset with `stop` merged away."""
+
+
+def allowed_for(decoding: dict, label_source: str, stop_as_exhale: bool = False) -> dict:
     """The transition table for this label set.
 
     Keyed by source, because the two label sets disagree about the commonest transition of all:
@@ -34,6 +38,11 @@ def allowed_for(decoding: dict, label_source: str) -> dict:
     written so an older config still loads.
     """
     allowed = decoding["allowed"]
+    if stop_as_exhale:
+        if STOP_AS_EXHALE not in allowed:
+            raise KeyError(f"decoding.allowed has no {STOP_AS_EXHALE} tables, and the dataset "
+                           "merges stop into exhale")
+        allowed = allowed[STOP_AS_EXHALE]
     if not set(allowed) & set(SOURCES):
         return allowed
     if label_source not in allowed:
@@ -47,7 +56,7 @@ def soft_dice(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor,
     """**1 - mean per-class Dice**, so this is a loss and zero is perfect. Classes absent from a
     batch are skipped. The coefficient itself is logged separately as `dice`."""
     probs = F.softmax(logits, dim=1)
-    onehot = F.one_hot(target, N_CLASSES).permute(0, 2, 1).float()
+    onehot = F.one_hot(target, logits.shape[1]).permute(0, 2, 1).float()
     keep = mask.unsqueeze(1).float()
     probs, onehot = probs * keep, onehot * keep
 
@@ -74,24 +83,25 @@ class PhaseSegmenter(pl.LightningModule):
 
     def __init__(self, model: dict[str, Any], training: dict[str, Any],
                  class_weights: list[float] | None = None, fps: float = 10.0,
-                 fold: int = 0, label_source: str = ALGORITHM):
+                 fold: int = 0, label_source: str = ALGORITHM, stop_as_exhale: bool = False):
         super().__init__()
         # A plain list, not an array: `save_hyperparameters` pickles what it was given, and
         # torch.load defaults to weights_only=True, which refuses a numpy global on reload.
         self.save_hyperparameters()
-        self.net = UNet1D(in_channels=model["in_channels"], n_classes=N_CLASSES,
+        self.classes = classes_for(stop_as_exhale)
+        self.net = UNet1D(in_channels=model["in_channels"], n_classes=len(self.classes),
                           channels=tuple(model["channels"]), bottleneck=model["bottleneck"],
                           kernel_size=model["kernel_size"], dropout=model.get("dropout", 0.0))
         self.cfg = training
         self.fps = float(fps)
         self.fold = int(fold)
-        weights = (torch.ones(N_CLASSES) if class_weights is None
+        weights = (torch.ones(len(self.classes)) if class_weights is None
                    else torch.as_tensor(np.asarray(class_weights), dtype=torch.float32))
         self.register_buffer("class_weights", weights)
 
         decoding = training.get("decoding", {})
-        self.cost = (transition_matrix(allowed_for(decoding, label_source),
-                                       decoding["switch_penalty"])
+        self.cost = (transition_matrix(allowed_for(decoding, label_source, stop_as_exhale),
+                                       decoding["switch_penalty"], self.classes)
                      if decoding.get("viterbi") else None)
         self.min_duration = decoding.get("min_duration") if decoding.get("enforce_min") else None
         self._epoch: dict[str, list] = {}
@@ -156,12 +166,12 @@ class PhaseSegmenter(pl.LightningModule):
             return
         flat_pred = np.concatenate([pred for pred, _ in store])
         flat_true = np.concatenate([truth for _, truth in store])
-        metrics = per_sample(flat_pred, flat_true)
+        metrics = per_sample(flat_pred, flat_true, classes=self.classes)
 
         events: dict[str, list[float]] = {}
         for pred, truth in store:
-            for key, value in event_level(pred, truth,
-                                          self.cfg.get("event_iou", 0.5)).items():
+            for key, value in event_level(pred, truth, self.cfg.get("event_iou", 0.5),
+                                          self.classes).items():
                 events.setdefault(key, []).append(value)
         for key, values in events.items():
             clean = [v for v in values if not np.isnan(v)]
